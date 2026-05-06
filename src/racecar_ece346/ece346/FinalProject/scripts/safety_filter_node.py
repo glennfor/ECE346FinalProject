@@ -55,6 +55,8 @@ from ece346.FinalProject.scripts.safety_filter.cost_evaluator import \
     CostEvaluator
 from ece346.FinalProject.scripts.safety_filter.obstacle_utils import \
     get_obstacle_vertices
+from ece346.FinalProject.scripts.safety_filter.predictive_filter import \
+    PredictiveSafetyFilter
 from ece346.FinalProject.scripts.safety_filter.projector import \
     ForwardProjector
 from nav_msgs.msg import Odometry
@@ -178,6 +180,11 @@ class SafetyFilterNode(Node):
 
         self._ilqr = ILQR(logger=self.get_logger(), config_file=ilqr_cfg_path)
 
+        self._predictive = PredictiveSafetyFilter(
+            ilqr=self._ilqr,
+            logger=self.get_logger(),
+        )
+
         # ---- TODO(Task 1.3): create subscribers ----
         self.create_subscription(
             AckermannDriveStamped, teleop_topic, self._teleop_cb, 1)
@@ -214,6 +221,7 @@ class SafetyFilterNode(Node):
         for marker in msg.markers:
             obs_id, verts = get_obstacle_vertices(marker)
             self._obstacle_dict[obs_id] = verts
+        self._predictive.update_obstacles(self._obstacle_dict)
 
     def _path_cb(self, msg):
         """Build a RefPath from the routing nav_msgs/Path message."""
@@ -233,6 +241,7 @@ class SafetyFilterNode(Node):
         try:
             self._ref_path = RefPath(
                 centerline, width_L, width_R, speed_limit, loop=False)
+            self._predictive.update_ref_path(self._ref_path)
             self.get_logger().info('Safety filter: reference path received.')
         except Exception as e:
             self.get_logger().warn(f'Invalid path: {e}')
@@ -380,45 +389,57 @@ class SafetyFilterNode(Node):
         # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
         #     return self.last_filter_control
 
-        trajectory, controls = self._projector.project(
-            state, human_speed, human_steer,
-            min_speed=self._proj_min_speed,
+        # ====================================================================
+        # ACTIVE: predictive (two-ILQR) safety filter
+        # ====================================================================
+        safe_speed, safe_steer, _info = self._predictive.filter(
+            state, human_speed, human_steer, dt_step=self._control_dt,
         )
+        filtered_speed = safe_speed
+        filtered_steer = safe_steer
 
-        costs = self._cost_eval.evaluate(
-            trajectory, controls, self._ref_path, self._obstacle_dict)
-
-        obs_cost = costs['obs_cost']
-        lane_cost = costs['lane_cost']
-        total_cost = costs['total_cost']
-
-        is_hard = (obs_cost > self._obs_hard or
-                   lane_cost > self._lane_hard or
-                   total_cost > self._total_hard)
-
-        is_soft = (obs_cost > self._obs_soft or
-                   lane_cost > self._lane_soft or
-                   total_cost > self._total_soft)
-
-        filtered_speed = human_speed
-        filtered_steer = human_steer
-
-        if is_hard:
-            filtered_speed = 0.0
-            override = self._run_ilqr_override(state)
-            if override is not None:
-                filtered_steer = float(override[1])
-            else:
-                filtered_steer = 0.0
-
-        elif is_soft:
-            override = self._run_ilqr_override(state)
-            if override is not None:
-                filtered_speed = min(abs(human_speed), float(override[0]))
-                filtered_steer = float(override[1])
-            else:
-                filtered_speed = human_speed * 0.5
-                filtered_steer = human_steer
+        # ====================================================================
+        # OLD: cost-threshold filter 
+        # ====================================================================
+        # trajectory, controls = self._projector.project(
+        #     state, human_speed, human_steer,
+        #     min_speed=self._proj_min_speed,
+        # )
+        #
+        # costs = self._cost_eval.evaluate(
+        #     trajectory, controls, self._ref_path, self._obstacle_dict)
+        #
+        # obs_cost = costs['obs_cost']
+        # lane_cost = costs['lane_cost']
+        # total_cost = costs['total_cost']
+        #
+        # is_hard = (obs_cost > self._obs_hard or
+        #            lane_cost > self._lane_hard or
+        #            total_cost > self._total_hard)
+        #
+        # is_soft = (obs_cost > self._obs_soft or
+        #            lane_cost > self._lane_soft or
+        #            total_cost > self._total_soft)
+        #
+        # filtered_speed = human_speed
+        # filtered_steer = human_steer
+        #
+        # if is_hard:
+        #     filtered_speed = 0.0
+        #     override = self._run_ilqr_override(state)
+        #     if override is not None:
+        #         filtered_steer = float(override[1])
+        #     else:
+        #         filtered_steer = 0.0
+        #
+        # elif is_soft:
+        #     override = self._run_ilqr_override(state)
+        #     if override is not None:
+        #         filtered_speed = min(abs(human_speed), float(override[0]))
+        #         filtered_steer = float(override[1])
+        #     else:
+        #         filtered_speed = human_speed * 0.5
+        #         filtered_steer = human_steer
 
         filtered_speed = min(filtered_speed, self._max_speed)
 
