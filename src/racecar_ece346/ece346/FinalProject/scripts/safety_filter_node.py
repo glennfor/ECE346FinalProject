@@ -47,20 +47,20 @@ import os
 
 import numpy as np
 import rclpy
-from rclpy.node import Node
-
 from ackermann_msgs.msg import AckermannDriveStamped
+from ament_index_python.packages import get_package_share_directory
+from ece346.FinalProject.ILQR_Example.ilqr import ILQR
+from ece346.FinalProject.ILQR_Example.ref_path import RefPath
+from ece346.FinalProject.scripts.safety_filter.cost_evaluator import \
+    CostEvaluator
+from ece346.FinalProject.scripts.safety_filter.obstacle_utils import \
+    get_obstacle_vertices
+from ece346.FinalProject.scripts.safety_filter.projector import \
+    ForwardProjector
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as PathMsg
+from rclpy.node import Node
 from visualization_msgs.msg import MarkerArray
-
-from ament_index_python.packages import get_package_share_directory
-
-from ece346.FinalProject.ILQR_Example.ref_path import RefPath
-from ece346.FinalProject.ILQR_Example.ilqr import ILQR
-from ece346.FinalProject.scripts.safety_filter.obstacle_utils import get_obstacle_vertices
-from ece346.FinalProject.scripts.safety_filter.projector import ForwardProjector
-from ece346.FinalProject.scripts.safety_filter.cost_evaluator import CostEvaluator
 
 
 def yaw_from_quat(qx, qy, qz, qw):
@@ -127,6 +127,7 @@ class SafetyFilterNode(Node):
         self.declare_parameter('total_hard_threshold', 2000.0)
 
         self.declare_parameter('wheelbase', 0.324)
+        self.declare_parameter('max_speed', 1.0)
 
         # ---- TODO(Task 1.2): read parameter values ----
         teleop_topic = self.get_parameter('teleop_topic').value
@@ -148,6 +149,7 @@ class SafetyFilterNode(Node):
         self._total_hard = self.get_parameter('total_hard_threshold').value
 
         self._wheelbase = self.get_parameter('wheelbase').value
+        self._max_speed = self.get_parameter('max_speed').value
 
         # This is for a specific case due to getting 0 controls
         # due to /joy and /joy_node publishing
@@ -359,15 +361,14 @@ class SafetyFilterNode(Node):
             return teleop
 
         state = self._extract_state(odom)
-        target_speed = teleop.drive.speed
-        target_steer = teleop.drive.steering_angle
+        human_speed = teleop.drive.speed
+        human_steer = teleop.drive.steering_angle
 
-        if abs(target_speed) < 0.001 and abs(target_steer) < 0.001:
-            return self.last_filter_control
-
+        # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
+        #     return self.last_filter_control
 
         trajectory, controls = self._projector.project(
-            state, target_speed, target_steer,
+            state, human_speed, human_steer,
             min_speed=self._proj_min_speed,
         )
 
@@ -386,32 +387,32 @@ class SafetyFilterNode(Node):
                    lane_cost > self._lane_soft or
                    total_cost > self._total_soft)
 
-        filtered_control = AckermannDriveStamped()
-        filtered_control.header = teleop.header
+        filtered_speed = human_speed
+        filtered_steer = human_steer
 
         if is_hard:
-            filtered_control.drive.speed = 0.0
+            filtered_speed = 0.0
             override = self._run_ilqr_override(state)
             if override is not None:
-                filtered_control.drive.speed = 0.0
-                filtered_control.drive.steering_angle = float(override[1])
+                filtered_steer = float(override[1])
             else:
-                filtered_control.drive.steering_angle = 0.0
-            return filtered_control
+                filtered_steer = 0.0
 
-        if is_soft:
+        elif is_soft:
             override = self._run_ilqr_override(state)
             if override is not None:
-                filtered_control.drive.speed = min(abs(target_speed), float(override[0]))
-                filtered_control.drive.steering_angle = float(override[1])
+                filtered_speed = min(abs(human_speed), float(override[0]))
+                filtered_steer = float(override[1])
             else:
-                speed_scale = 0.5
-                filtered_control.drive.speed = target_speed * speed_scale
-                filtered_control.drive.steering_angle = target_steer
-            return filtered_control
+                filtered_speed = human_speed * 0.5
+                filtered_steer = human_steer
 
-        filtered_control.drive.speed = target_speed
-        filtered_control.drive.steering_angle = target_steer
+        filtered_speed = min(filtered_speed, self._max_speed)
+
+        filtered_control = AckermannDriveStamped()
+        filtered_control.header = teleop.header
+        filtered_control.drive.speed = filtered_speed
+        filtered_control.drive.steering_angle = filtered_steer
         self.last_filter_control = filtered_control
         return filtered_control
 
