@@ -87,13 +87,40 @@ class CollisionChecker:
         
         obj_point_global = ego_rotm@obj_point + ego_trans
         
-        distance  = result.min_distance
+        distance = result.min_distance
         if distance < -1e10:
             distance = -0.01
-        
-        output = np.array([ego_point[0], ego_point[1], obj_point_global[0], obj_point_global[1], distance])
-        if np.any(np.isnan(output)):
-            print("NAN in collision")
+
+        # Old:
+        # output = np.array([ego_point[0], ego_point[1], obj_point_global[0], obj_point_global[1], distance])
+        # if np.any(np.isnan(output)):
+        #     print("NAN in collision")
+        # return output
+
+        output = np.array(
+            [
+                ego_point[0],
+                ego_point[1],
+                obj_point_global[0],
+                obj_point_global[1],
+                distance,
+            ],
+            dtype=float,
+        )
+        # hppfcl can yield non-finite points/distances on degenerate geometry;
+        # NaNs in obs_refs blow up JAX Hessians in iLQR (eigvals fails).
+        if not np.all(np.isfinite(output)):
+            output = np.array(
+                [
+                    float(np.nan_to_num(output[0], nan=0.0)),
+                    float(np.nan_to_num(output[1], nan=0.0)),
+                    float(np.nan_to_num(output[2], nan=0.0)),
+                    float(np.nan_to_num(output[3], nan=0.0)),
+                    1.0,
+                ],
+                dtype=float,
+            )
+        output[4] = float(np.nan_to_num(output[4], nan=1.0, posinf=1e3, neginf=-1e3))
         return output
     
     def check_collisions(self, state: np.ndarray, obstacles: list) -> np.ndarray:

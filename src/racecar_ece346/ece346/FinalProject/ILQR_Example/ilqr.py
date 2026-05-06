@@ -178,8 +178,16 @@ class ILQR():
 			Q_ux_reg = H[:,:,t] + B[:,:,t].T @ (P+reg_matrix) @ A[:,:,t]
 
 			
-			# check if Q_uu_reg is PD
-			if not np.all(np.linalg.eigvals(Q_uu_reg) > 0) and reg < self.reg_max and reg_attempt < self.max_attempt:
+			# check if Q_uu_reg is PD (use symmetrized matrix; eigvalsh avoids complex noise)
+			# Old: if not np.all(np.linalg.eigvals(Q_uu_reg) > 0) and reg < self.reg_max and reg_attempt < self.max_attempt:
+			Q_sym = 0.5 * (Q_uu_reg + Q_uu_reg.T)
+			is_pd = False
+			if np.all(np.isfinite(Q_sym)):
+				try:
+					is_pd = bool(np.all(np.linalg.eigvalsh(Q_sym) > 0))
+				except np.linalg.LinAlgError:
+					is_pd = False
+			if (not is_pd) and reg < self.reg_max and reg_attempt < self.max_attempt:
 				reg *= self.reg_scale_up
 				t = T-2
 				p = q[:,T-1]

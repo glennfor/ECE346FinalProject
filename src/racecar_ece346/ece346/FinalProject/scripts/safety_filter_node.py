@@ -127,7 +127,7 @@ class SafetyFilterNode(Node):
         self.declare_parameter('total_hard_threshold', 2000.0)
 
         self.declare_parameter('wheelbase', 0.324)
-        self.declare_parameter('max_speed', 1.0)
+        self.declare_parameter('max_speed', 0.4)
 
         # ---- TODO(Task 1.2): read parameter values ----
         teleop_topic = self.get_parameter('teleop_topic').value
@@ -151,6 +151,9 @@ class SafetyFilterNode(Node):
         self._wheelbase = self.get_parameter('wheelbase').value
         self._max_speed = self.get_parameter('max_speed').value
 
+        # ILQR uses dt=0.2 s stages, but this node republishes at publish_rate Hz.
+        # Overrides must advance (accel, omega) over one ROS cycle, not one ILQR step.
+        self._control_dt = 1.0 / float(publish_rate)
         # This is for a specific case due to getting 0 controls
         # due to /joy and /joy_node publishing
         self.last_filter_control = None
@@ -309,13 +312,23 @@ class SafetyFilterNode(Node):
         if plan.get('status', -1) == -1:
             return None
 
-        traj = plan['trajectory']
+        # traj = plan['trajectory']
         controls = plan['controls']
 
         accel_cmd = controls[0, 0]
-        safe_speed = max(0.0, state[2] + accel_cmd * self._proj_dt)
+        omega_cmd = controls[1, 0]
 
-        delta_next = traj[4, 1] if traj.shape[1] > 1 else state[4]
+        # safe_speed = max(0.0, state[2] + accel_cmd * self._proj_dt)
+
+        # delta_next = traj[4, 1] if traj.shape[1] > 1 else state[4]
+        # return safe_speed, delta_next
+
+        # First ILQR control is ZOH for dt_ilqr; one ROS tick is much shorter—apply a slice.
+        dt = self._control_dt
+        safe_speed = max(0.0, state[2] + accel_cmd * dt)
+
+        delta_next = float(
+            np.clip(state[4] + omega_cmd * dt, -0.35, 0.35))
         return safe_speed, delta_next
 
     def safety_filter(self, teleop, odom, obstacles):
