@@ -149,6 +149,10 @@ class SafetyFilterNode(Node):
 
         self._wheelbase = self.get_parameter('wheelbase').value
 
+        # This is for a specific case due to getting 0 controls
+        # due to /joy and /joy_node publishing
+        self.last_filter_control = None
+
         self._latest_teleop = None     # AckermannDriveStamped
         self._latest_odom = None       # Odometry
         self._latest_obs = None        # MarkerArray
@@ -358,6 +362,10 @@ class SafetyFilterNode(Node):
         target_speed = teleop.drive.speed
         target_steer = teleop.drive.steering_angle
 
+        if abs(target_speed) < 0.001 and abs(target_steer) < 0.001:
+            return self.last_filter_control
+
+
         trajectory, controls = self._projector.project(
             state, target_speed, target_steer,
             min_speed=self._proj_min_speed,
@@ -378,33 +386,34 @@ class SafetyFilterNode(Node):
                    lane_cost > self._lane_soft or
                    total_cost > self._total_soft)
 
-        out = AckermannDriveStamped()
-        out.header = teleop.header
+        filtered_control = AckermannDriveStamped()
+        filtered_control.header = teleop.header
 
         if is_hard:
-            out.drive.speed = 0.0
+            filtered_control.drive.speed = 0.0
             override = self._run_ilqr_override(state)
             if override is not None:
-                out.drive.speed = 0.0
-                out.drive.steering_angle = override[1]
+                filtered_control.drive.speed = 0.0
+                filtered_control.drive.steering_angle = float(override[1])
             else:
-                out.drive.steering_angle = 0.0
-            return out
+                filtered_control.drive.steering_angle = 0.0
+            return filtered_control
 
         if is_soft:
             override = self._run_ilqr_override(state)
             if override is not None:
-                out.drive.speed = min(abs(target_speed), override[0])
-                out.drive.steering_angle = override[1]
+                filtered_control.drive.speed = min(abs(target_speed), float(override[0]))
+                filtered_control.drive.steering_angle = float(override[1])
             else:
                 speed_scale = 0.5
-                out.drive.speed = target_speed * speed_scale
-                out.drive.steering_angle = target_steer
-            return out
+                filtered_control.drive.speed = target_speed * speed_scale
+                filtered_control.drive.steering_angle = target_steer
+            return filtered_control
 
-        out.drive.speed = target_speed
-        out.drive.steering_angle = target_steer
-        return out
+        filtered_control.drive.speed = target_speed
+        filtered_control.drive.steering_angle = target_steer
+        self.last_filter_control = filtered_control
+        return filtered_control
 
 
 def main(args=None):
