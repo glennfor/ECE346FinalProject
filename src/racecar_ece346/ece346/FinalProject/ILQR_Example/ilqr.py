@@ -272,6 +272,9 @@ class ILQR():
 		J = self.cost.get_traj_cost(trajectory, controls, path_refs, obs_refs)
   
 		converged = False
+		status = 2
+		K_closed_loop = np.zeros((self.dim_u, self.dim_x, self.T))
+		k_open_loop = np.zeros((self.dim_u, self.T))
 		for i in range(self.max_iter):
 			K_closed_loop, k_open_loop, last_reg= self.backward_pass(trajectory, controls, path_refs, obs_refs)
 			changed = False
