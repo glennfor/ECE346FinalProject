@@ -64,11 +64,6 @@ from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from visualization_msgs.msg import MarkerArray
 
-# --- TEST ONLY: follow ILQR plan only (no predictive / human blend). Set False
-# or delete this constant and the `if _FOLLOW_ILQR_PLAN_ONLY:` block in
-# safety_filter() to restore normal behavior.
-_FOLLOW_ILQR_PLAN_ONLY = True
-
 
 def yaw_from_quat(qx, qy, qz, qw):
     """Extract yaw (heading, rad) from a quaternion. Useful for Task 2."""
@@ -135,6 +130,24 @@ class SafetyFilterNode(Node):
 
         self.declare_parameter('wheelbase', 0.324)
         self.declare_parameter('max_speed', 0.4)
+        self.declare_parameter(
+            'planner_ilqr_config',
+            os.path.join(
+                get_package_share_directory('racecar_ece346'),
+                'config',
+                'task2_ilqr_planner.yaml',
+            ),
+        )
+        self.declare_parameter(
+            'monitor_ilqr_config',
+            os.path.join(
+                get_package_share_directory('racecar_ece346'),
+                'config',
+                'task2_ilqr_monitor.yaml',
+            ),
+        )
+        self.declare_parameter('monitor_max_allowed_cost', 3000.0)
+        self.declare_parameter('planner_max_allowed_cost', 4000.0)
 
         # ---- TODO(Task 1.2): read parameter values ----
         teleop_topic = self.get_parameter('teleop_topic').value
@@ -157,6 +170,12 @@ class SafetyFilterNode(Node):
 
         self._wheelbase = self.get_parameter('wheelbase').value
         self._max_speed = self.get_parameter('max_speed').value
+        planner_ilqr_cfg_path = self.get_parameter('planner_ilqr_config').value
+        monitor_ilqr_cfg_path = self.get_parameter('monitor_ilqr_config').value
+        monitor_max_allowed_cost = float(
+            self.get_parameter('monitor_max_allowed_cost').value)
+        planner_max_allowed_cost = float(
+            self.get_parameter('planner_max_allowed_cost').value)
 
         # ILQR uses dt=0.2 s stages, but this node republishes at publish_rate Hz.
         # Overrides must advance (accel, omega) over one ROS cycle, not one ILQR step.
@@ -179,15 +198,20 @@ class SafetyFilterNode(Node):
             horizon=proj_T,
         )
 
-        pkg_share = get_package_share_directory('racecar_ece346')
-        ilqr_cfg_path = os.path.join(pkg_share, 'config', 'task2_ilqr.yaml')
-        self._cost_eval = CostEvaluator(config_path=ilqr_cfg_path)
+        self._cost_eval = CostEvaluator(config_path=planner_ilqr_cfg_path)
 
-        self._ilqr = ILQR(logger=self.get_logger(), config_file=ilqr_cfg_path)
+        self._planner_ilqr = ILQR(
+            logger=self.get_logger(), config_file=planner_ilqr_cfg_path)
+        self._monitor_ilqr = ILQR(
+            logger=self.get_logger(), config_file=monitor_ilqr_cfg_path)
+        self._ilqr = self._planner_ilqr
 
         self._predictive = PredictiveSafetyFilter(
-            ilqr=self._ilqr,
+            planner_ilqr=self._planner_ilqr,
+            monitor_ilqr=self._monitor_ilqr,
             logger=self.get_logger(),
+            monitor_max_allowed_cost=monitor_max_allowed_cost,
+            planner_max_allowed_cost=planner_max_allowed_cost,
         )
 
         # ---- TODO(Task 1.3): create subscribers ----
@@ -391,26 +415,18 @@ class SafetyFilterNode(Node):
         human_speed = teleop.drive.speed
         human_steer = teleop.drive.steering_angle
 
-        if _FOLLOW_ILQR_PLAN_ONLY:
-            override = self._run_ilqr_override(state)
-            if override is not None:
-                filtered_speed = float(override[0])
-                filtered_steer = float(override[1])
-            else:
-                filtered_speed = human_speed
-                filtered_steer = human_steer
-        else:
-            # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
-            #     return self.last_filter_control
+        
+        # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
+        #     return self.last_filter_control
 
-            # ====================================================================
-            # ACTIVE: predictive (two-ILQR) safety filter
-            # ====================================================================
-            safe_speed, safe_steer, _info = self._predictive.filter(
-                state, human_speed, human_steer, dt_step=self._control_dt,
-            )
-            filtered_speed = safe_speed
-            filtered_steer = safe_steer
+        # ====================================================================
+        # ACTIVE: predictive (two-ILQR) safety filter
+        # ====================================================================
+        safe_speed, safe_steer, _info = self._predictive.filter(
+            state, human_speed, human_steer, dt_step=self._control_dt,
+        )
+        filtered_speed = safe_speed
+        filtered_steer = safe_steer
 
         # ====================================================================
         # OLD: cost-threshold filter 

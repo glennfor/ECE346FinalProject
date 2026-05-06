@@ -1,23 +1,18 @@
 """
-Predictive (two-ILQR) safety filter.
+Predictive safety filter with dual ILQR roles:
 
-A control input from the human driver is considered safe iff, after applying it
-for one ROS tick, there still exists a feasible safe trajectory from the
-resulting state. This is checked with two ILQR plans per tick:
+    monitor ILQR (higher costs): evaluates whether applying the human command
+        for one ROS tick lands in an unsafe state.
+    planner ILQR (nominal costs): produces the safe fallback command when the
+        monitor flags unsafe.
 
-    plan_a: from x_after_human  -> "is there a recovery plan if we let the
-                                    human act for one tick?"
-    plan_b: from x_current      -> the safe optimal plan from now; used as the
-                                    fallback control when plan_a fails.
+Decision policy:
+    1) If monitor cost is below threshold -> pass human command.
+    2) If monitor cost is unsafe -> publish planner ILQR first control.
+    3) If planner is also unsafe/invalid -> full brake fallback.
 
-A plan is "feasible" when the planner produced a trajectory and the minimum
-geometric distance to every obstacle stays above `min_clearance`. We compute
-clearance with the same hppfcl collision checker the ILQR uses, so the check
-is independent of the smooth barrier cost weights and is not fooled by ILQR
-converging to a locally optimal but corner-cutting plan.
-
-The single shared ILQR instance is reused for both plans. Each role keeps its
-own warm-start nominal control buffer so successive plans converge fast.
+This keeps the monitor conservative while still using a less aggressive planner
+for practical control when intervention is required.
 """
 
 from typing import Optional, Tuple
@@ -29,22 +24,24 @@ class PredictiveSafetyFilter:
 
     def __init__(
         self,
-        ilqr,
+        planner_ilqr,
+        monitor_ilqr,
         logger=None,
-        min_clearance: float = 0.0,
+        monitor_max_allowed_cost: float = 3000.0,
+        planner_max_allowed_cost: float = 4000.0,
         kp_accel: float = 5.0,
         kp_steer: float = 6.0,
         delta_max: float = 0.35,
     ):
         """
         Args:
-            ilqr: shared ILQR instance (its dyn, cost, collision_checker,
-                ref_path and obstacle_list are reused).
+            planner_ilqr: ILQR instance used to generate fallback controls.
+            monitor_ilqr: ILQR instance with higher costs for safety checking.
             logger: optional ROS logger.
-            min_clearance: minimum required signed distance (m) between ego
-                and any obstacle along the planned horizon for the plan to
-                be considered feasible. 0.0 means "no penetration"; raise to
-                e.g. 0.05 for a safety buffer.
+            monitor_max_allowed_cost: maximum plan cost tolerated by the
+                monitor. Above this is unsafe.
+            planner_max_allowed_cost: maximum plan cost tolerated by the
+                planner override. Above this is unsafe, so brake fallback.
             kp_accel, kp_steer: P-gains used to convert the human's
                 (target_speed, target_steer) into bicycle controls
                 (accel, omega) for the one-step forward simulation. Match
@@ -52,25 +49,28 @@ class PredictiveSafetyFilter:
             delta_max: steering clip used when mapping the fallback's first
                 ILQR control back into a steering angle command.
         """
-        self._ilqr = ilqr
+        self._planner_ilqr = planner_ilqr
+        self._monitor_ilqr = monitor_ilqr
         self._logger = logger
-        self._min_clearance = float(min_clearance)
+        self._monitor_max_allowed_cost = float(monitor_max_allowed_cost)
+        self._planner_max_allowed_cost = float(planner_max_allowed_cost)
         self._kp_accel = float(kp_accel)
         self._kp_steer = float(kp_steer)
         self._delta_max = float(delta_max)
 
-        self._u_warm_a = np.zeros((ilqr.dim_u, ilqr.T))
-        self._u_warm_b = np.zeros((ilqr.dim_u, ilqr.T))
+        self._u_warm_monitor = np.zeros((monitor_ilqr.dim_u, monitor_ilqr.T))
+        self._u_warm_planner = np.zeros((planner_ilqr.dim_u, planner_ilqr.T))
 
         self._last_safe_steer = 0.0
         self._has_path = False
         self._has_obstacles = False
 
     def update_ref_path(self, ref_path) -> None:
-        self._ilqr.update_ref_path(ref_path)
+        self._planner_ilqr.update_ref_path(ref_path)
+        self._monitor_ilqr.update_ref_path(ref_path)
         self._has_path = ref_path is not None
-        self._u_warm_a.fill(0.0)
-        self._u_warm_b.fill(0.0)
+        self._u_warm_monitor.fill(0.0)
+        self._u_warm_planner.fill(0.0)
 
     def update_obstacles(self, obstacle_dict: dict) -> None:
         """Push current obstacles into the shared ILQR.
@@ -79,7 +79,8 @@ class PredictiveSafetyFilter:
         node from /Obstacles/Static.
         """
         obs_list = list(obstacle_dict.values()) if obstacle_dict else []
-        self._ilqr.update_obstacles(obs_list)
+        self._planner_ilqr.update_obstacles(obs_list)
+        self._monitor_ilqr.update_obstacles(obs_list)
         self._has_obstacles = len(obs_list) > 0
 
     def filter(
@@ -91,55 +92,59 @@ class PredictiveSafetyFilter:
     ) -> Tuple[float, float, str]:
         """
         Returns (safe_speed, safe_steer, info) where info is one of
-        'pass'      — human command accepted (plan_a feasible)
-        'override'  — fallback ILQR_B's first control applied
-        'brake'     — both plans infeasible; full brake with last steer
+        'pass'      — human command accepted (monitor safe)
+        'override'  — planner first control applied (monitor unsafe)
+        'brake'     — monitor unsafe and planner unsafe; full brake
         'no_path'   — no ref path yet; passthrough human command
         """
         if not self._has_path:
             return float(human_speed), float(human_steer), 'no_path'
 
-        accel_h, omega_h = self._human_to_uvec(state, human_speed, human_steer)
+        accel_h, omega_h = self._teleop_command_to_controls(
+            state, human_speed, human_steer)
         state_after = self._sim_forward(state, accel_h, omega_h, dt_step)
 
-        plan_a = self._safe_plan(state_after, self._u_warm_a)
-        plan_b = self._safe_plan(state, self._u_warm_b)
+        monitor_plan = self._safe_plan(
+            self._monitor_ilqr, state_after, self._u_warm_monitor)
+        planner_plan = self._safe_plan(
+            self._planner_ilqr, state, self._u_warm_planner)
 
-        feas_a = self._verify(plan_a)
-        feas_b = self._verify(plan_b)
+        monitor_is_unsafe = self._is_unsafe(
+            monitor_plan, self._monitor_max_allowed_cost)
+        planner_is_unsafe = self._is_unsafe(
+            planner_plan, self._planner_max_allowed_cost)
 
-        if plan_a is not None and 'controls' in plan_a:
-            self._u_warm_a = self._shift_controls(plan_a['controls'])
-        if plan_b is not None and 'controls' in plan_b:
-            self._u_warm_b = self._shift_controls(plan_b['controls'])
+        if monitor_plan is not None and 'controls' in monitor_plan:
+            self._u_warm_monitor = self._shift_controls(monitor_plan['controls'])
+        if planner_plan is not None and 'controls' in planner_plan:
+            self._u_warm_planner = self._shift_controls(planner_plan['controls'])
 
-        if feas_a:
+        if not monitor_is_unsafe:
             self._last_safe_steer = float(human_steer)
             return float(human_speed), float(human_steer), 'pass'
 
-        if feas_b:
+        if not planner_is_unsafe:
             safe_speed, safe_steer = self._first_control_to_cmd(
-                plan_b, state, dt_step)
+                planner_plan, state, dt_step)
             self._last_safe_steer = safe_steer
             return safe_speed, safe_steer, 'override'
 
         if self._logger is not None:
             self._logger.warn(
-                'PredictiveSafetyFilter: both plans infeasible — braking.')
+                'PredictiveSafetyFilter: monitor+planner unsafe — braking.')
         return 0.0, self._last_safe_steer, 'brake'
 
-    def _human_to_uvec(
+    def _teleop_command_to_controls(
         self, state: np.ndarray, target_speed: float, target_steer: float
     ) -> Tuple[float, float]:
         """Map (target_speed, target_steer) -> (accel, omega) via P-control.
 
-        Mirrors ForwardProjector so the simulated step matches the dynamics
-        the human would experience under the existing low-level controllers.
+        Simulated step matches the dynamics the human would experience under the existing low-level controllers.
         """
         v_cur = float(state[2])
         delta_cur = float(state[4])
 
-        ctrl_lim = self._ilqr.dyn.ctrl_limits
+        ctrl_lim = self._planner_ilqr.dyn.ctrl_limits
         a_min, a_max = float(ctrl_lim[0, 0]), float(ctrl_lim[0, 1])
         o_min, o_max = float(ctrl_lim[1, 0]), float(ctrl_lim[1, 1])
 
@@ -155,57 +160,36 @@ class PredictiveSafetyFilter:
         Sub-steps at ilqr.dt to keep RK4 accuracy and to reuse the exact
         integrator the planner trusts.
         """
-        ilqr_dt = float(self._ilqr.dt)
+        ilqr_dt = float(self._planner_ilqr.dt)
         n_sub = max(1, int(round(dt_step / ilqr_dt)))
         u = np.array([accel, omega])
         x = np.asarray(state, dtype=float).copy()
         for _ in range(n_sub):
-            x, _ = self._ilqr.dyn.integrate_forward_np(x, u)
+            x, _ = self._planner_ilqr.dyn.integrate_forward_np(x, u)
             x = np.asarray(x)
         return x
 
-    def _safe_plan(self, init_state: np.ndarray, warm_controls: np.ndarray) -> Optional[dict]:
+    def _safe_plan(self, ilqr, init_state: np.ndarray, warm_controls: np.ndarray) -> Optional[dict]:
         try:
-            return self._ilqr.plan(init_state, controls=warm_controls.copy())
+            return ilqr.plan(init_state, controls=warm_controls.copy())
         except Exception as e:
             if self._logger is not None:
                 self._logger.warn(f'PredictiveSafetyFilter: ILQR plan failed: {e}')
             return None
 
-    def _verify(self, plan_result: Optional[dict]) -> bool:
-        """Trajectory-level feasibility check (status + min clearance)."""
+    def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> bool:
+        """Unsafe if invalid status/plan or if plan cost exceeds max allowed."""
         if plan_result is None:
-            return False
+            return True
         if plan_result.get('status', -1) == -1:
-            return False
-        traj = plan_result.get('trajectory')
-        if traj is None:
-            return False
-
-        traj = np.asarray(traj)
-        obs_list = self._ilqr.obstacle_list
-        if not obs_list:
             return True
 
-        prev_step = self._ilqr.collision_checker.step
-        try:
-            self._ilqr.collision_checker.step = traj.shape[1]
-            obs_refs = self._ilqr.collision_checker.check_collisions(traj, obs_list)
-        except Exception as e:
-            if self._logger is not None:
-                self._logger.warn(
-                    f'PredictiveSafetyFilter: collision check failed: {e}')
-            return False
-        finally:
-            self._ilqr.collision_checker.step = prev_step
-
-        if obs_refs is None:
+        total_cost = plan_result.get('J')
+        if total_cost is None:
             return True
-
-        distances = obs_refs[:, 4, :]
-        if not np.all(np.isfinite(distances)):
-            return False
-        return bool(np.min(distances) >= self._min_clearance)
+        if not np.isfinite(total_cost):
+            return True
+        return bool(float(total_cost) >= float(max_allowed_cost))
 
     def _first_control_to_cmd(
         self, plan: dict, state: np.ndarray, dt_step: float

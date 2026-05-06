@@ -107,6 +107,8 @@ safety_filter_node:
     total_soft_threshold: 400.0
     total_hard_threshold: 2000.0
     wheelbase: 0.324
+    monitor_max_allowed_cost: 3000.0
+    planner_max_allowed_cost: 4000.0
 
 # --- Sim-only bridge: /drive (Ackermann) -> /control (ServoMsg) ---
 drive_to_servo_node:
