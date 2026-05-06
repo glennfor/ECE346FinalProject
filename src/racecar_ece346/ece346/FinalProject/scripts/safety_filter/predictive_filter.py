@@ -32,6 +32,10 @@ class PredictiveSafetyFilter:
         kp_accel: float = 5.0,
         kp_steer: float = 6.0,
         delta_max: float = 0.35,
+        accel_min: Optional[float] = None,
+        accel_max: Optional[float] = None,
+        omega_min: Optional[float] = None,
+        omega_max: Optional[float] = None,
     ):
         """
         Args:
@@ -48,6 +52,9 @@ class PredictiveSafetyFilter:
                 the constants used in ForwardProjector.
             delta_max: steering clip used when mapping the fallback's first
                 ILQR control back into a steering angle command.
+            accel_min, accel_max, omega_min, omega_max: optional explicit
+                control caps from node/yaml. If any is None, that bound falls
+                back to planner ILQR ctrl_limits.
         """
         self._planner_ilqr = planner_ilqr
         self._monitor_ilqr = monitor_ilqr
@@ -57,6 +64,10 @@ class PredictiveSafetyFilter:
         self._kp_accel = float(kp_accel)
         self._kp_steer = float(kp_steer)
         self._delta_max = float(delta_max)
+        self._accel_min = accel_min
+        self._accel_max = accel_max
+        self._omega_min = omega_min
+        self._omega_max = omega_max
 
         self._u_warm_monitor = np.zeros((monitor_ilqr.dim_u, monitor_ilqr.T))
         self._u_warm_planner = np.zeros((planner_ilqr.dim_u, planner_ilqr.T))
@@ -162,6 +173,7 @@ class PredictiveSafetyFilter:
         """
         ilqr_dt = float(self._planner_ilqr.dt)
         n_sub = max(1, int(round(dt_step / ilqr_dt)))
+        accel, omega = self._clip_controls(accel, omega)
         u = np.array([accel, omega])
         x = np.asarray(state, dtype=float).copy()
         for _ in range(n_sub):
@@ -198,12 +210,24 @@ class PredictiveSafetyFilter:
         controls = np.asarray(plan['controls'])
         accel_cmd = float(controls[0, 0])
         omega_cmd = float(controls[1, 0])
+        accel_cmd, omega_cmd = self._clip_controls(accel_cmd, omega_cmd)
         safe_speed = max(0.0, float(state[2]) + accel_cmd * dt_step)
         safe_steer = float(np.clip(
             float(state[4]) + omega_cmd * dt_step,
             -self._delta_max, self._delta_max,
         ))
         return safe_speed, safe_steer
+
+    def _clip_controls(self, accel: float, omega: float) -> Tuple[float, float]:
+        """Clip controls to yaml limits (or ILQR defaults)."""
+        ctrl_lim = self._planner_ilqr.dyn.ctrl_limits
+        a_min = float(self._accel_min) if self._accel_min is not None else float(ctrl_lim[0, 0])
+        a_max = float(self._accel_max) if self._accel_max is not None else float(ctrl_lim[0, 1])
+        o_min = float(self._omega_min) if self._omega_min is not None else float(ctrl_lim[1, 0])
+        o_max = float(self._omega_max) if self._omega_max is not None else float(ctrl_lim[1, 1])
+        accel = float(np.clip(accel, a_min, a_max))
+        omega = float(np.clip(omega, o_min, o_max))
+        return accel, omega
 
     @staticmethod
     def _shift_controls(controls: np.ndarray) -> np.ndarray:

@@ -70,3 +70,7 @@ safety_filter_node:
     wheelbase: 0.324
     monitor_max_allowed_cost: 3000.0
     planner_max_allowed_cost: 4000.0
+    filter_accel_min: -1.5
+    filter_accel_max: 1.5
+    filter_omega_min: -6.0
+    filter_omega_max: 6.0

@@ -148,6 +148,10 @@ class SafetyFilterNode(Node):
         )
         self.declare_parameter('monitor_max_allowed_cost', 3000.0)
         self.declare_parameter('planner_max_allowed_cost', 4000.0)
+        self.declare_parameter('filter_accel_min', -1.5)
+        self.declare_parameter('filter_accel_max', 1.5)
+        self.declare_parameter('filter_omega_min', -6.0)
+        self.declare_parameter('filter_omega_max', 6.0)
 
         # ---- TODO(Task 1.2): read parameter values ----
         teleop_topic = self.get_parameter('teleop_topic').value
@@ -176,6 +180,10 @@ class SafetyFilterNode(Node):
             self.get_parameter('monitor_max_allowed_cost').value)
         planner_max_allowed_cost = float(
             self.get_parameter('planner_max_allowed_cost').value)
+        filter_accel_min = float(self.get_parameter('filter_accel_min').value)
+        filter_accel_max = float(self.get_parameter('filter_accel_max').value)
+        filter_omega_min = float(self.get_parameter('filter_omega_min').value)
+        filter_omega_max = float(self.get_parameter('filter_omega_max').value)
 
         # ILQR uses dt=0.2 s stages, but this node republishes at publish_rate Hz.
         # Overrides must advance (accel, omega) over one ROS cycle, not one ILQR step.
@@ -212,6 +220,10 @@ class SafetyFilterNode(Node):
             logger=self.get_logger(),
             monitor_max_allowed_cost=monitor_max_allowed_cost,
             planner_max_allowed_cost=planner_max_allowed_cost,
+            accel_min=filter_accel_min,
+            accel_max=filter_accel_max,
+            omega_min=filter_omega_min,
+            omega_max=filter_omega_max,
         )
 
         # ---- TODO(Task 1.3): create subscribers ----
