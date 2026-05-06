@@ -64,6 +64,11 @@ from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
 from visualization_msgs.msg import MarkerArray
 
+# --- TEST ONLY: follow ILQR plan only (no predictive / human blend). Set False
+# or delete this constant and the `if _FOLLOW_ILQR_PLAN_ONLY:` block in
+# safety_filter() to restore normal behavior.
+_FOLLOW_ILQR_PLAN_ONLY = True
+
 
 def yaw_from_quat(qx, qy, qz, qw):
     """Extract yaw (heading, rad) from a quaternion. Useful for Task 2."""
@@ -386,17 +391,26 @@ class SafetyFilterNode(Node):
         human_speed = teleop.drive.speed
         human_steer = teleop.drive.steering_angle
 
-        # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
-        #     return self.last_filter_control
+        if _FOLLOW_ILQR_PLAN_ONLY:
+            override = self._run_ilqr_override(state)
+            if override is not None:
+                filtered_speed = float(override[0])
+                filtered_steer = float(override[1])
+            else:
+                filtered_speed = human_speed
+                filtered_steer = human_steer
+        else:
+            # if abs(human_speed) < 0.001 and abs(human_steer) < 0.001:
+            #     return self.last_filter_control
 
-        # ====================================================================
-        # ACTIVE: predictive (two-ILQR) safety filter
-        # ====================================================================
-        safe_speed, safe_steer, _info = self._predictive.filter(
-            state, human_speed, human_steer, dt_step=self._control_dt,
-        )
-        filtered_speed = safe_speed
-        filtered_steer = safe_steer
+            # ====================================================================
+            # ACTIVE: predictive (two-ILQR) safety filter
+            # ====================================================================
+            safe_speed, safe_steer, _info = self._predictive.filter(
+                state, human_speed, human_steer, dt_step=self._control_dt,
+            )
+            filtered_speed = safe_speed
+            filtered_steer = safe_steer
 
         # ====================================================================
         # OLD: cost-threshold filter 
