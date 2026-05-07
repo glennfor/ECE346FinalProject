@@ -87,7 +87,7 @@ class PredictiveSafetyFilter:
         self._ref_path = None
         self._obstacle_vertices = []
         self._obstacles = []  # list of Obstacle objects for collision checker
-        self._brake_distance = 0.20  # meters — brake if min distance < this
+        self._brake_distance = 1.0  # meters — brake if min distance < this
 
         collision_cfg = SimpleNamespace(
             width=0.22, length=0.40, wheelbase=0.324, T=1)
@@ -138,6 +138,9 @@ class PredictiveSafetyFilter:
         if refs is None:
             return False
         min_dist = float(np.min(refs[:, 4, :]))
+        if self._logger is not None:
+                self._logger.info(
+                    f'DIST==: obstacle  {min_dist}m away')
         return min_dist < self._brake_distance
 
     def filter(
@@ -159,7 +162,7 @@ class PredictiveSafetyFilter:
             if self._logger is not None:
                 self._logger.warn(
                     f'PredictiveSafetyFilter: obstacle within {self._brake_distance}m — braking')
-            return 0.0, 0.0, 'proximity_brake'
+            return 0.0, .1, 'proximity_brake'
 
         if not self._has_path:
             return float(human_speed), float(human_steer), 'no_path'
@@ -189,27 +192,27 @@ class PredictiveSafetyFilter:
         if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
             self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
 
-        if self._logger is not None:
-            self._logger.warn(
-                f'PredictiveSafetyFilter:. '
-                f'monitor[{monitor_reason}] '
-                # f'| planner[{planner_reason}] | '
-                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
-                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
-            )
+        # if self._logger is not None:
+        #     self._logger.warn(
+        #         f'PredictiveSafetyFilter:. '
+        #         f'monitor[{monitor_reason}] '
+        #         # f'| planner[{planner_reason}] | '
+        #         f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+        #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+        #     )
         # add for braking
         if not monitor_is_unsafe:
             self._last_safe_steer = float(human_steer)
             return float(human_speed), float(human_steer), 'pass'
         
-        if self._logger is not None:
-            self._logger.warn(
-                f'PredictiveSafetyFilter:. '
-                f'monitor[{monitor_reason}]'
-                # f' | planner[{planner_reason}] | '
-                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
-                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
-            )
+        # if self._logger is not None:
+        #     self._logger.warn(
+        #         f'PredictiveSafetyFilter:. '
+        #         f'monitor[{monitor_reason}]'
+        #         # f' | planner[{planner_reason}] | '
+        #         f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+        #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+        #     )
         
         return 0.0, float(human_steer), 'Stopped'
 
