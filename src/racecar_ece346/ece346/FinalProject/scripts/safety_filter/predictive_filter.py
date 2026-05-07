@@ -16,9 +16,13 @@ for practical control when intervention is required.
 """
 
 import copy
+from types import SimpleNamespace
 from typing import Optional, Tuple
 
 import numpy as np
+
+from ece346.FinalProject.ILQR_Example.cost.collision_checker.collision_checker import CollisionChecker
+from ece346.FinalProject.ILQR_Example.cost.collision_checker.obstacle import Obstacle
 
 
 class PredictiveSafetyFilter:
@@ -81,8 +85,13 @@ class PredictiveSafetyFilter:
         self._has_path = False
         self._has_obstacles = False
         self._ref_path = None
-        self._obstacle_vertices = []  # list of (n,3) arrays for proximity check
-        self._brake_distance = 0.20   # meters — brake if any obstacle vertex within this
+        self._obstacle_vertices = []
+        self._obstacles = []  # list of Obstacle objects for collision checker
+        self._brake_distance = 0.20  # meters — brake if min distance < this
+
+        collision_cfg = SimpleNamespace(
+            width=0.22, length=0.40, wheelbase=0.324, T=1)
+        self._collision_checker = CollisionChecker(collision_cfg)
         
         self._on_planner_plan = None
         self._on_monitor_plan = None
@@ -112,21 +121,24 @@ class PredictiveSafetyFilter:
         """
         obs_list = list(obstacle_dict.values()) if obstacle_dict else []
         self._obstacle_vertices = obs_list
+        self._obstacles = [Obstacle(verts) for verts in obs_list]
         self._planner_ilqr.update_obstacles(obs_list)
         self._monitor_ilqr.update_obstacles(obs_list)
         self._has_obstacles = len(obs_list) > 0
 
     def _obstacle_too_close(self, state: np.ndarray) -> bool:
-        """Return True if any obstacle vertex is within brake_distance of the car."""
-        if not self._obstacle_vertices:
+        """Return True if any obstacle's signed distance to the vehicle body < brake_distance."""
+        if not self._obstacles:
             return False
-        truck_xy = state[:2]
-        for verts in self._obstacle_vertices:
-            diffs = np.asarray(verts)[:, :2] - truck_xy
-            dists = np.linalg.norm(diffs, axis=1)
-            if np.min(dists) < self._brake_distance:
-                return True
-        return False
+        state_col = state.reshape(5, 1)
+        try:
+            refs = self._collision_checker.check_collisions(state_col, self._obstacles)
+        except Exception:
+            return False
+        if refs is None:
+            return False
+        min_dist = float(np.min(refs[:, 4, :]))
+        return min_dist < self._brake_distance
 
     def filter(
         self,
