@@ -18,9 +18,9 @@ traffic_simulation_node:
     static_obs_topic: /Obstacles/Static
     dyn_obs_topic: /Obstacles/Dynamic
     # FinalProject owns /Obstacles/Static via static_obstacle_publisher_node.
-    "~num_dyn_obs": 0
-    "~num_static_obs": 0
-    "~static_obs_size": 0.2
+    '~num_dyn_obs': 0
+    '~num_static_obs': 0
+    '~static_obs_size': 0.2
 
 # --- FinalProject static obstacle source ---
 # Owns /Obstacles/Static. Loads obstacle_yaml at startup and appends RViz
@@ -60,12 +60,12 @@ joy_to_ackermann_node:
   ros__parameters:
     joy_topic: /joy
     teleop_topic: /teleop
-    throttle_axis: 1         # left stick Y (up = forward)
-    steering_axis: 3         # right stick X (left = +steering)
+    throttle_axis: 1 # left stick Y (up = forward)
+    steering_axis: 3 # right stick X (left = +steering)
     throttle_sign: 1.0
     steering_sign: 1.0
-    max_speed: 1.0            # m/s
-    max_steering_angle: 0.34  # rad
+    max_speed: 1.0 # m/s
+    max_steering_angle: 0.34 # rad
     deadzone: 0.05
 
 # --- Student's safety filter ---
@@ -109,6 +109,10 @@ safety_filter_node:
     wheelbase: 0.324
     monitor_max_allowed_cost: 3000.0
     planner_max_allowed_cost: 4000.0
+
+    # We need a hard geometric lane boundary: min clearance of 0.1m from body of car before
+    # human control is rejected
+    min_lane_margin: 0.03
     filter_accel_min: -1.5
     filter_accel_max: 1.5
     filter_omega_min: -6.0
@@ -120,6 +124,6 @@ drive_to_servo_node:
     drive_topic: /drive
     control_topic: /control
     odom_topic: /slam_pose
-    v_max: 1.0          # m/s
+    v_max: 1.0 # m/s
     # a_max and speed_kp use the node's built-in sim defaults (5.0 / 5.0).
     # The truck yaml overrides these to the physical truck limits.

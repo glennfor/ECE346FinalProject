@@ -29,6 +29,7 @@ class PredictiveSafetyFilter:
         logger=None,
         monitor_max_allowed_cost: float = 3000.0,
         planner_max_allowed_cost: float = 4000.0,
+        min_lane_margin: float = 0.03,
         kp_accel: float = 5.0,
         kp_steer: float = 6.0,
         delta_max: float = 0.35,
@@ -46,6 +47,8 @@ class PredictiveSafetyFilter:
                 monitor. Above this is unsafe.
             planner_max_allowed_cost: maximum plan cost tolerated by the
                 planner override. Above this is unsafe, so brake fallback.
+            min_lane_margin: minimum lane margin in meters between the truck and the lane boundary
+                along a planned path. geometric hard check different from smooth lane cost
             kp_accel, kp_steer: P-gains used to convert the human's
                 (target_speed, target_steer) into bicycle controls
                 (accel, omega) for the one-step forward simulation. Match
@@ -61,6 +64,7 @@ class PredictiveSafetyFilter:
         self._logger = logger
         self._monitor_max_allowed_cost = float(monitor_max_allowed_cost)
         self._planner_max_allowed_cost = float(planner_max_allowed_cost)
+        self._min_lane_margin = float(min_lane_margin)
         self._kp_accel = float(kp_accel)
         self._kp_steer = float(kp_steer)
         self._delta_max = float(delta_max)
@@ -75,8 +79,10 @@ class PredictiveSafetyFilter:
         self._last_safe_steer = 0.0
         self._has_path = False
         self._has_obstacles = False
+        self._ref_path = None
 
     def update_ref_path(self, ref_path) -> None:
+        self._ref_path = ref_path
         self._planner_ilqr.update_ref_path(ref_path)
         self._monitor_ilqr.update_ref_path(ref_path)
         self._has_path = ref_path is not None
@@ -191,9 +197,16 @@ class PredictiveSafetyFilter:
 
     def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> bool:
         """Unsafe if invalid status/plan or if plan cost exceeds max allowed."""
+         """Unsafe if invalid, high-cost, or geometrically outside the lane."""
         if plan_result is None:
             return True
         if plan_result.get('status', -1) == -1:
+            return True
+
+        traj = plan_result.get('trajectory')
+        if traj is None:
+            return True
+        if self._violates_lane_margin(np.asarray(traj)):
             return True
 
         total_cost = plan_result.get('J')
@@ -203,19 +216,73 @@ class PredictiveSafetyFilter:
             return True
         return bool(float(total_cost) >= float(max_allowed_cost))
 
+    def _violates_lane_margin(self, trajectory: np.ndarray) -> bool:
+        """Hard lane-boundary check for the whole vehicle body.
+
+        The ILQR lane cost is smooth, so it may still produce a "recoverable"
+        plan whose first state is already outside the lane but whose total cost
+        is below threshold. The safety filter needs a hard invariant: do not
+        accept the human command if the one-step future state or recovery plan
+        leaves too little room to either boundary.
+        """
+        if self._ref_path is None:
+            return False
+
+        try:
+            refs = self._ref_path.get_reference(trajectory[:2, :])
+        except Exception as e:
+            if self._logger is not None:
+                self._logger.warn(
+                    f'PredictiveSafetyFilter: lane check failed: {e}')
+            return True
+
+        closest_x = refs[0, :]
+        closest_y = refs[1, :]
+        slope = refs[2, :]
+        width_right = refs[5, :]
+        width_left = refs[6, :]
+
+        dx = trajectory[0, :] - closest_x
+        dy = trajectory[1, :] - closest_y
+        path_dev = np.sin(slope) * dx - np.cos(slope) * dy
+
+        vehicle_half_width = float(self._planner_ilqr.config.width) / 2.0
+        right_margin = width_right - vehicle_half_width - path_dev
+        left_margin = width_left - vehicle_half_width + path_dev
+        min_margin = min(float(np.min(right_margin)), float(np.min(left_margin)))
+        return min_margin < self._min_lane_margin
+
     def _first_control_to_cmd(
         self, plan: dict, state: np.ndarray, dt_step: float
     ) -> Tuple[float, float]:
-        """Apply ILQR's first stage control over one ROS tick."""
-        controls = np.asarray(plan['controls'])
-        accel_cmd = float(controls[0, 0])
-        omega_cmd = float(controls[1, 0])
-        accel_cmd, omega_cmd = self._clip_controls(accel_cmd, omega_cmd)
-        safe_speed = max(0.0, float(state[2]) + accel_cmd * dt_step)
-        safe_steer = float(np.clip(
-            float(state[4]) + omega_cmd * dt_step,
-            -self._delta_max, self._delta_max,
-        ))
+        # """Apply ILQR's first stage control over one ROS tick."""
+        # controls = np.asarray(plan['controls'])
+        # accel_cmd = float(controls[0, 0])
+        # omega_cmd = float(controls[1, 0])
+        # accel_cmd, omega_cmd = self._clip_controls(accel_cmd, omega_cmd)
+        # safe_speed = max(0.0, float(state[2]) + accel_cmd * dt_step)
+        # safe_steer = float(np.clip(
+        #     float(state[4]) + omega_cmd * dt_step,
+        #     -self._delta_max, self._delta_max,
+        # ))
+        # return safe_speed, safe_steer
+
+        """Map ILQR's next planned state to a speed/steering command.
+
+        /drive.steering_angle is a steering position target, not a steering
+        rate. Publishing state[4] + omega * dt_step under-commands the servo
+        because dt_step is much smaller than the ILQR horizon step. Use the
+        next planned wheel angle directly.
+        """
+        traj = np.asarray(plan['trajectory'])
+        if traj.shape[1] > 1:
+            safe_speed = max(0.0, float(traj[2, 1]))
+            safe_steer = float(np.clip(
+                traj[4, 1], -self._delta_max, self._delta_max))
+        else:
+            safe_speed = max(0.0, float(state[2]))
+            safe_steer = float(np.clip(
+                state[4], -self._delta_max, self._delta_max))
         return safe_speed, safe_steer
 
     def _clip_controls(self, accel: float, omega: float) -> Tuple[float, float]:

@@ -40,12 +40,12 @@ joy_to_ackermann_node:
   ros__parameters:
     joy_topic: /joy
     teleop_topic: /teleop
-    throttle_axis: 1         # left stick Y (up = forward)
-    steering_axis: 3         # right stick X (left = +steering)
+    throttle_axis: 1 # left stick Y (up = forward)
+    steering_axis: 3 # right stick X (left = +steering)
     throttle_sign: 1.0
     steering_sign: 1.0
-    max_speed: 0.5            # m/s 
-    max_steering_angle: 0.34  # rad 
+    max_speed: 0.5 # m/s
+    max_steering_angle: 0.34 # rad
     deadzone: 0.05
 
 # --- Student's safety filter ---
@@ -70,6 +70,9 @@ safety_filter_node:
     wheelbase: 0.324
     monitor_max_allowed_cost: 3000.0
     planner_max_allowed_cost: 4000.0
+    # We need a hard geometric lane boundary: min clearance of 0.1m from body of car before
+    # human control is rejected
+    min_lane_margin: 0.03
     filter_accel_min: -1.5
     filter_accel_max: 1.5
     filter_omega_min: -6.0

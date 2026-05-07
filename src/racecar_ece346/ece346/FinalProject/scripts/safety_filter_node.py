@@ -148,6 +148,7 @@ class SafetyFilterNode(Node):
         )
         self.declare_parameter('monitor_max_allowed_cost', 3000.0)
         self.declare_parameter('planner_max_allowed_cost', 4000.0)
+        self.declare_parameter('min_lane_margin', 0.03)
         self.declare_parameter('filter_accel_min', -1.5)
         self.declare_parameter('filter_accel_max', 1.5)
         self.declare_parameter('filter_omega_min', -6.0)
@@ -180,6 +181,7 @@ class SafetyFilterNode(Node):
             self.get_parameter('monitor_max_allowed_cost').value)
         planner_max_allowed_cost = float(
             self.get_parameter('planner_max_allowed_cost').value)
+        min_lane_margin = float(self.get_parameter('min_lane_margin').value)
         filter_accel_min = float(self.get_parameter('filter_accel_min').value)
         filter_accel_max = float(self.get_parameter('filter_accel_max').value)
         filter_omega_min = float(self.get_parameter('filter_omega_min').value)
@@ -220,6 +222,7 @@ class SafetyFilterNode(Node):
             logger=self.get_logger(),
             monitor_max_allowed_cost=monitor_max_allowed_cost,
             planner_max_allowed_cost=planner_max_allowed_cost,
+            min_lane_margin=min_lane_margin,
             accel_min=filter_accel_min,
             accel_max=filter_accel_max,
             omega_min=filter_omega_min,
