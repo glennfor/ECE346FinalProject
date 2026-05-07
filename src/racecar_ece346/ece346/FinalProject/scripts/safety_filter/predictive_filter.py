@@ -80,6 +80,18 @@ class PredictiveSafetyFilter:
         self._has_path = False
         self._has_obstacles = False
         self._ref_path = None
+        
+        self._on_planner_plan = None
+        self._on_monitor_plan = None
+
+    def set_plan_callbacks(self, on_planner_plan=None, on_monitor_plan=None):
+        """Register callbacks called with the (5, T) trajectory each tick.
+
+        on_planner_plan(trajectory_np)  — called after the planner solve.
+        on_monitor_plan(trajectory_np)  — called after the monitor solve.
+        """
+        self._on_planner_plan = on_planner_plan
+        self._on_monitor_plan = on_monitor_plan
 
     def update_ref_path(self, ref_path) -> None:
         self._ref_path = ref_path
@@ -135,6 +147,13 @@ class PredictiveSafetyFilter:
             self._u_warm_monitor = self._shift_controls(monitor_plan['controls'])
         if planner_plan is not None and 'controls' in planner_plan:
             self._u_warm_planner = self._shift_controls(planner_plan['controls'])
+        
+
+        if self._on_planner_plan and planner_plan and 'trajectory' in planner_plan:
+            self._on_planner_plan(np.asarray(planner_plan['trajectory']))
+        if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
+            self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
+
 
         if not monitor_is_unsafe:
             self._last_safe_steer = float(human_steer)

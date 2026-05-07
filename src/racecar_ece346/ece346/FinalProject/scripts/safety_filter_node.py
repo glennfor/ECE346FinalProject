@@ -59,6 +59,7 @@ from ece346.FinalProject.scripts.safety_filter.predictive_filter import \
     PredictiveSafetyFilter
 from ece346.FinalProject.scripts.safety_filter.projector import \
     ForwardProjector
+from ece346.FinalProject.scripts.safety_filter.vizualizer import Visualizer
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
@@ -227,6 +228,12 @@ class SafetyFilterNode(Node):
             accel_max=filter_accel_max,
             omega_min=filter_omega_min,
             omega_max=filter_omega_max,
+        )
+
+        self._viz = Visualizer(self)
+        self._predictive.set_plan_callbacks(
+            on_planner_plan=self._viz.update_planner_plan,
+            on_monitor_plan=self._viz.update_monitor_plan,
         )
 
         # ---- TODO(Task 1.3): create subscribers ----
