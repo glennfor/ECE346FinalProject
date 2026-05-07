@@ -59,6 +59,8 @@ from ece346.FinalProject.scripts.safety_filter.predictive_filter import \
     PredictiveSafetyFilter
 from ece346.FinalProject.scripts.safety_filter.projector import \
     ForwardProjector
+from ece346.FinalProject.scripts.safety_filter.simple_filter import \
+    SimpleSafetyFilter
 from ece346.FinalProject.scripts.safety_filter.visualizer import Visualizer
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as PathMsg
@@ -217,7 +219,7 @@ class SafetyFilterNode(Node):
             logger=self.get_logger(), config_file=monitor_ilqr_cfg_path)
         self._ilqr = self._planner_ilqr
 
-        self._predictive = PredictiveSafetyFilter(
+        self._predictive_filter = PredictiveSafetyFilter(
             planner_ilqr=self._planner_ilqr,
             monitor_ilqr=self._monitor_ilqr,
             logger=self.get_logger(),
@@ -230,8 +232,17 @@ class SafetyFilterNode(Node):
             omega_max=filter_omega_max,
         )
 
+        self._simple_filter = SimpleSafetyFilter(
+            projector=self._projector,
+            logger=self.get_logger(),
+            lane_margin=min_lane_margin,
+            obs_margin=0.15,
+            vehicle_half_width=self._wheelbase / 2.0,
+            lookahead_steps=8,
+        )
+
         self._viz = Visualizer(self)
-        self._predictive.set_plan_callbacks(
+        self._predictive_filter.set_plan_callbacks(
             on_planner_plan=self._viz.update_planner_plan,
             on_monitor_plan=self._viz.update_monitor_plan,
         )
@@ -272,7 +283,8 @@ class SafetyFilterNode(Node):
         for marker in msg.markers:
             obs_id, verts = get_obstacle_vertices(marker)
             self._obstacle_dict[obs_id] = verts
-        self._predictive.update_obstacles(self._obstacle_dict)
+        self._predictive_filter.update_obstacles(self._obstacle_dict)
+        self._simple_filter.update_obstacles(self._obstacle_dict)
 
     def _path_cb(self, msg):
         """Build a RefPath from the routing nav_msgs/Path message."""
@@ -292,7 +304,8 @@ class SafetyFilterNode(Node):
         try:
             self._ref_path = RefPath(
                 centerline, width_L, width_R, speed_limit, loop=False)
-            self._predictive.update_ref_path(self._ref_path)
+            self._predictive_filter.update_ref_path(self._ref_path)
+            self._simple_filter.update_ref_path(self._ref_path)
             self.get_logger().info('Safety filter: reference path received.')
         except Exception as e:
             self.get_logger().warn(f'Invalid path: {e}')
@@ -444,9 +457,12 @@ class SafetyFilterNode(Node):
         # ====================================================================
         # ACTIVE: predictive (two-ILQR) safety filter
         # ====================================================================
-        safe_speed, safe_steer, _info = self._predictive.filter(
+        safe_speed, safe_steer, _info = self._predictive_filter.filter(
             state, human_speed, human_steer, dt_step=0.3 ,#self._control_dt,
         )
+        # safe_speed, safe_steer, _info = self._simple_filter.filter(
+        #     state, human_speed, human_steer, dt_step=0.3,
+        # )
         filtered_speed = safe_speed
         filtered_steer = safe_steer
 
