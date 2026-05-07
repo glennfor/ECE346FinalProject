@@ -72,7 +72,7 @@ safety_filter_node:
     planner_max_allowed_cost: 4000.0
     # We need a hard geometric lane boundary: min clearance of 0.1m from body of car before
     # human control is rejected
-    min_lane_margin: 0.03
+    min_lane_margin: 0.1 #0.03
     filter_accel_min: -1.5
     filter_accel_max: 1.5
     filter_omega_min: -6.0

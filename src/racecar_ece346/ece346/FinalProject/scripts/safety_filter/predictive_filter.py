@@ -197,7 +197,7 @@ class PredictiveSafetyFilter:
 
     def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> bool:
         """Unsafe if invalid status/plan or if plan cost exceeds max allowed."""
-         """Unsafe if invalid, high-cost, or geometrically outside the lane."""
+        """Unsafe if invalid, high-cost, or geometrically outside the lane."""
         if plan_result is None:
             return True
         if plan_result.get('status', -1) == -1:
