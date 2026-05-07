@@ -15,10 +15,10 @@ This keeps the monitor conservative while still using a less aggressive planner
 for practical control when intervention is required.
 """
 
+import copy
 from typing import Optional, Tuple
 
 import numpy as np
-import copy
 
 
 class PredictiveSafetyFilter:
@@ -81,6 +81,8 @@ class PredictiveSafetyFilter:
         self._has_path = False
         self._has_obstacles = False
         self._ref_path = None
+        self._obstacle_vertices = []  # list of (n,3) arrays for proximity check
+        self._brake_distance = 0.20   # meters — brake if any obstacle vertex within this
         
         self._on_planner_plan = None
         self._on_monitor_plan = None
@@ -109,9 +111,22 @@ class PredictiveSafetyFilter:
         node from /Obstacles/Static.
         """
         obs_list = list(obstacle_dict.values()) if obstacle_dict else []
+        self._obstacle_vertices = obs_list
         self._planner_ilqr.update_obstacles(obs_list)
         self._monitor_ilqr.update_obstacles(obs_list)
         self._has_obstacles = len(obs_list) > 0
+
+    def _obstacle_too_close(self, state: np.ndarray) -> bool:
+        """Return True if any obstacle vertex is within brake_distance of the car."""
+        if not self._obstacle_vertices:
+            return False
+        truck_xy = state[:2]
+        for verts in self._obstacle_vertices:
+            diffs = np.asarray(verts)[:, :2] - truck_xy
+            dists = np.linalg.norm(diffs, axis=1)
+            if np.min(dists) < self._brake_distance:
+                return True
+        return False
 
     def filter(
         self,
@@ -126,7 +141,14 @@ class PredictiveSafetyFilter:
         'override'  — planner first control applied (monitor unsafe)
         'brake'     — monitor unsafe and planner unsafe; full brake
         'no_path'   — no ref path yet; passthrough human command
+        'proximity_brake' — obstacle within brake_distance; full stop
         """
+        if self._obstacle_too_close(state):
+            if self._logger is not None:
+                self._logger.warn(
+                    f'PredictiveSafetyFilter: obstacle within {self._brake_distance}m — braking')
+            return 0.0, 0.0, 'proximity_brake'
+
         if not self._has_path:
             return float(human_speed), float(human_steer), 'no_path'
 
