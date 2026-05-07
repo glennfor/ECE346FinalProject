@@ -235,7 +235,7 @@ class SafetyFilterNode(Node):
         self._simple_filter = SimpleSafetyFilter(
             projector=self._projector,
             logger=self.get_logger(),
-            lane_margin=min_lane_margin,
+            lane_margin=0.15,
             obs_margin=0.15,
             vehicle_half_width=self._wheelbase / 2.0,
             lookahead_steps=8,
@@ -458,10 +458,10 @@ class SafetyFilterNode(Node):
         # ACTIVE: predictive (two-ILQR) safety filter
         # ====================================================================
         safe_speed, safe_steer, _info = self._predictive_filter.filter(
-            state, human_speed, human_steer, dt_step=0.3 ,#self._control_dt,
+            state, human_speed, human_steer, dt_step=0.1 #1.1#0.3 ,#self._control_dt,
         )
         # safe_speed, safe_steer, _info = self._simple_filter.filter(
-        #     state, human_speed, human_steer, dt_step=0.3,
+        #     state, human_speed, human_steer, dt_step=0.1,
         # )
         filtered_speed = safe_speed
         filtered_steer = safe_steer
@@ -511,7 +511,7 @@ class SafetyFilterNode(Node):
 
         # filtered_speed = min(filtered_speed, self._max_speed)
 
-        filtered_speed = np.clip(filtered_speed, 0, 0.4)
+        filtered_speed = np.clip(filtered_speed, 0, 0.3)
 
         filtered_control = AckermannDriveStamped()
         filtered_control.header = teleop.header

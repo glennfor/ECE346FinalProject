@@ -141,8 +141,8 @@ class PredictiveSafetyFilter:
 
         monitor_is_unsafe, monitor_reason = self._is_unsafe(
             monitor_plan, self._monitor_max_allowed_cost)
-        planner_is_unsafe, planner_reason = self._is_unsafe(
-            planner_plan, self._planner_max_allowed_cost)
+        # planner_is_unsafe, planner_reason = self._is_unsafe(
+        #     planner_plan, self._planner_max_allowed_cost, skip_first_state=True)
 
         if monitor_plan is not None and 'controls' in monitor_plan:
             self._u_warm_monitor = self._shift_controls(monitor_plan['controls'])
@@ -155,10 +155,29 @@ class PredictiveSafetyFilter:
         if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
             self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
 
-
+        if self._logger is not None:
+            self._logger.warn(
+                f'PredictiveSafetyFilter:. '
+                f'monitor[{monitor_reason}] '
+                # f'| planner[{planner_reason}] | '
+                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+            )
+        # add for braking
         if not monitor_is_unsafe:
             self._last_safe_steer = float(human_steer)
             return float(human_speed), float(human_steer), 'pass'
+        
+        if self._logger is not None:
+            self._logger.warn(
+                f'PredictiveSafetyFilter:. '
+                f'monitor[{monitor_reason}]'
+                # f' | planner[{planner_reason}] | '
+                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+            )
+        
+        return 0.0, float(human_steer), 'Stopped'
 
         if not planner_is_unsafe:
             safe_speed, safe_steer = self._first_control_to_cmd(
@@ -166,13 +185,7 @@ class PredictiveSafetyFilter:
             self._last_safe_steer = safe_steer
             return safe_speed, safe_steer, 'override'
 
-        if self._logger is not None:
-            self._logger.warn(
-                f'PredictiveSafetyFilter: braking. '
-                f'monitor[{monitor_reason}] | planner[{planner_reason}] | '
-                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
-                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
-            )
+        
         return 0.0, self._last_safe_steer, 'brake'
 
     def _teleop_command_to_controls(
@@ -201,15 +214,54 @@ class PredictiveSafetyFilter:
         Sub-steps at ilqr.dt to keep RK4 accuracy and to reuse the exact
         integrator the planner trusts.
         """
-        ilqr_dt = float(self._planner_ilqr.dt)
-        n_sub = max(1, int(round(dt_step / ilqr_dt)))
-        accel, omega = self._clip_controls(accel, omega)
-        u = np.array([accel, omega])
-        x = np.asarray(state, dtype=float).copy()
-        for _ in range(n_sub):
-            x, _ = self._planner_ilqr.dyn.integrate_forward_np(x, u)
-            x = np.asarray(x)
-        return x
+        # ilqr_dt = float(self._planner_ilqr.dt)
+        # n_sub = max(1, int(round(dt_step / ilqr_dt)))
+        # accel, omega = self._clip_controls(accel, omega)
+        # u = np.array([accel, omega])
+        # x = np.asarray(state, dtype=float).copy()
+        # for _ in range(n_sub):
+        #     x, _ = self._planner_ilqr.dyn.integrate_forward_np(x, u)
+        #     x = np.asarray(x)
+        # return x
+        # return self._rk4_step(state, accel, omega, dt_step)
+        return self.dyn_steps(state, [accel, omega], dt_step, 5)
+    
+    def dyn_steps(self, x, u, dt, times = 1):
+        for _ in range(times):
+            dx = np.array([x[2]*np.cos(x[3]),
+                        x[2]*np.sin(x[3]),
+                        u[0],
+                        x[2]*np.tan(u[1]*1.1)/0.257,
+                        0
+                        ])
+            x_new = x + dx*dt
+            x_new[2] = max(0, x_new[2]) # do not allow negative velocity
+            x_new[3] = np.mod(x_new[3] + np.pi, 2 * np.pi) - np.pi
+            x_new[-1] = u[1]
+            x = x_new
+        return x_new
+    
+    def _deriv(self, state: np.ndarray, accel: float, omega: float) -> np.ndarray:
+        x, y, v, psi, delta = state
+        return np.array([
+            v * np.cos(psi),
+            v * np.sin(psi),
+            accel,
+            v * np.tan(delta) /  0.324, # self.wheelbase,
+            omega,
+        ])
+
+    def _rk4_step(self, state: np.ndarray, accel: float, omega: float, dt) -> np.ndarray:
+        k1 = self._deriv(state, accel, omega)
+        k2 = self._deriv(state + k1 * dt / 2, accel, omega)
+        k3 = self._deriv(state + k2 * dt / 2, accel, omega)
+        k4 = self._deriv(state + k3 * dt, accel, omega)
+        state_next = state + (k1 + 2 * k2 + 2 * k3 + k4) * dt / 6
+
+        state_next[2] = np.clip(state_next[2], 0.0, 0.4)
+        state_next[3] = np.atan2(np.sin(state_next[3]), np.cos(state_next[3]))
+        state_next[4] = np.clip(state_next[4], -0.35, 35)
+        return state_next
 
     def _safe_plan(self, ilqr, init_state: np.ndarray, warm_controls: Optional[np.ndarray] = None) -> Optional[dict]:
         try:
@@ -220,7 +272,7 @@ class PredictiveSafetyFilter:
                 self._logger.warn(f'PredictiveSafetyFilter: ILQR plan failed: {e}')
             return None
 
-    def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> Tuple[bool, str]:
+    def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float, skip_first_state: bool = False) -> Tuple[bool, str]:
         """Return (is_unsafe, reason). reason is a short string with values.
 
         Unsafe if invalid status/plan, geometrically outside the lane, or if
@@ -234,8 +286,15 @@ class PredictiveSafetyFilter:
         traj = plan_result.get('trajectory')
         if traj is None:
             return True, 'trajectory=None'
+        
+        # TEST CODE
+        check_traj = np.asarray(traj)
+        if skip_first_state and check_traj.shape[1] > 1:
+            check_traj = check_traj[:, 1:]
 
-        margin = self._lane_min_margin(np.asarray(traj))
+        # END TEST #margin = ....(np.asarray(traj))
+
+        margin = self._lane_min_margin(check_traj)
         total_cost = plan_result.get('J')
         cost_str = (f'{float(total_cost):.1f}'
                     if total_cost is not None and np.isfinite(total_cost)
@@ -323,9 +382,11 @@ class PredictiveSafetyFilter:
         """
         traj = np.asarray(plan['trajectory'])
         if traj.shape[1] > 1:
-            safe_speed = max(0.0, float(traj[2, 1]))
+            # changed k for 1
+            k = min(8, traj.shape[1] -1)
+            safe_speed = max(0.0, float(traj[2, k]))
             safe_steer = float(np.clip(
-                traj[4, 1], -self._delta_max, self._delta_max))
+                traj[4, k], -self._delta_max, self._delta_max))
         else:
             safe_speed = max(0.0, float(state[2]))
             safe_steer = float(np.clip(

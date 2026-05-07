@@ -3,7 +3,7 @@
 ####################################################
 num_dim_x: 5
 num_dim_u: 2
-T: 50
+T: 20
 dt: 0.1
 platform: 'cpu'
 
@@ -43,9 +43,9 @@ v_min: 0.0
 omega_min: -6.0
 omega_max: 6.0
 a_max: 1.5 #5.0
-a_min: 0 #-1.5 #-5.0
+a_min: -1.5 #-5.0
 
-v_ref: 0.4 #0.8
+v_ref: 0.0 #0.8
 
 ####################################################
 ########## Parameters for ILQR COST ################
@@ -58,7 +58,7 @@ dim_closest_pt_x: 0
 dim_closest_pt_y: 1
 dim_path_slope: 2
 path_cost_type: 'quadratic'
-path_weight: 20.0 #8.0
+path_weight: 15.0 #20.0 #8.0
 path_huber_delta: 2
 
 # Velocity Cost
@@ -73,7 +73,7 @@ vel_limit_b: 1.0
 
 # Heading Cost
 heading_cost_type: 'quadratic'
-heading_weight: 10.0 #4.0 #2.0
+heading_weight: 8.0 #10.0 #4.0 #2.0
 heading_huber_delta: 1
 
 # Lateral Acceleration Cost
@@ -89,7 +89,7 @@ progress_weight: 0
 dim_right_boundary: 5
 dim_left_boundary: 6
 lane_boundary_a: 50.0 #20.0 #50.0
-lane_boundary_b: 3.0 #15.0 #3.0
+lane_boundary_b: 20.0 #15.0 #3.0
 
 ########        Control Cost          ############
 
