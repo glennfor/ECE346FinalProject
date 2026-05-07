@@ -16,6 +16,7 @@ for practical control when intervention is required.
 """
 
 import copy
+import time
 from types import SimpleNamespace
 from typing import Optional, Tuple
 
@@ -64,6 +65,15 @@ class PredictiveSafetyFilter:
             accel_min, accel_max, omega_min, omega_max: optional explicit
                 control caps from node/yaml. If any is None, that bound falls
                 back to planner ILQR ctrl_limits.
+            planner_replan_sec, planner_track_xy_thresh, planner_track_yaw_thresh:
+                kept for call compatibility with safety_filter_node; values are
+                IGNORED — use hardcoded self._planner_* assignments in __init__
+                body below.
+
+            # Original arg docs (when these kwargs drove behavior):
+            # planner_replan_sec: minimum wall time between replans while overriding.
+            # planner_track_xy_thresh: replan if |xy - nominal| exceeds this (m).
+            # planner_track_yaw_thresh: replan if |yaw - nominal| exceeds this (rad).
         """
         self._planner_ilqr = planner_ilqr
         self._monitor_ilqr = monitor_ilqr
@@ -78,6 +88,20 @@ class PredictiveSafetyFilter:
         self._accel_max = accel_max
         self._omega_min = omega_min
         self._omega_max = omega_max
+
+        # --- Replan / nominal tracking: HARDcoded here (same defaults as old ROS params). ---
+        # Node still passes planner_replan_sec / planner_track_* but they are ignored.
+        self._planner_replan_sec = 0.15  # s; min host-monotonic interval between replans while overriding
+        self._planner_track_xy_thresh = 0.35  # m; replan if |xy - x_bar| exceeds this at current stage k
+        self._planner_track_yaw_thresh = 0.5  # rad; replan if |yaw - yaw_bar| exceeds this at stage k
+        # prev impl: read from constructor / ROS:
+        # self._planner_replan_sec = float(planner_replan_sec)
+        # self._planner_track_xy_thresh = float(planner_track_xy_thresh)
+        # self._planner_track_yaw_thresh = float(planner_track_yaw_thresh)
+        _ignored_planner_tune_from_node = (
+            planner_replan_sec, planner_track_xy_thresh, planner_track_yaw_thresh)
+
+        self._last_planner_replan_mono = 0.0  # time.monotonic() stamp; Lab3 used ROS t in state[-1]
 
         self._u_warm_monitor = np.zeros((monitor_ilqr.dim_u, monitor_ilqr.T))
         self._u_warm_planner = np.zeros((planner_ilqr.dim_u, planner_ilqr.T))
@@ -119,6 +143,7 @@ class PredictiveSafetyFilter:
         self._has_path = ref_path is not None
         self._u_warm_monitor.fill(0.0)
         self._u_warm_planner.fill(0.0)
+        self._exit_override()
 
     def update_obstacles(self, obstacle_dict: dict) -> None:
         """Push current obstacles into the shared ILQR.
@@ -145,70 +170,116 @@ class PredictiveSafetyFilter:
         if refs is None:
             return False
         min_dist = float(np.min(refs[:, 4, :]))
-        if self._logger is not None:
-                self._logger.info(
-                    f'DIST==: obstacle  {min_dist}m away')
         return min_dist < self._brake_distance
 
     def _generate_plan(self, state: np.ndarray) -> Optional[dict]:
         """Generate a fresh planner plan from current state, warm-starting if possible."""
         warm = self._u_warm_planner if np.any(self._u_warm_planner) else None
-        fail = ' Did not fail'
-        plan = self._safe_plan(self._planner_ilqr, state, None) #warm)
-        if plan is None :
-            fail = 'plan is None'
+        plan = self._safe_plan(self._planner_ilqr, state, warm)
+        if plan is None:
+            if self._logger is not None:
+                self._logger.warn('PredictiveSafetyFilter: planner returned None')
+            return None
         if plan.get('status', -1) in (-1, 2):
-            fail = 'status=-1,2'
-            plan =  None
+            if self._logger is not None:
+                self._logger.warn(
+                    f'PredictiveSafetyFilter: planner status={plan.get("status")}')
+            return None
         if 'trajectory' not in plan or 'controls' not in plan:
-            plan = None
-            fail = 'Missing part'
-        if self._logger is not None:
-            self._logger.warn( f'Our plan gneratioon failed because:. {fail}')
+            return None
         return plan
 
     def _enter_override(self, state: np.ndarray) -> bool:
         """Plan once when first entering override mode. Returns True if plan succeeded."""
-        plan = self._generate_plan(state)
-        if self._logger is not None:
-            self._logger.warn( f'Our plan is good:. {plan is not None}')
+        plan = self._generate_plan(np.asarray(state, dtype=float).ravel()[:5])
         if plan is None:
             return False
         self._active_plan = plan
         self._plan_step = 0
         self._is_overriding = True
         self._u_warm_planner = np.asarray(plan['controls']).copy()
-
-        
+        self._last_planner_replan_mono = time.monotonic()
         return True
 
-    def _advance_plan(self, state: np.ndarray) -> Optional[Tuple[float, float]]:
-        """Consume next step from cached plan. Replan if exhausted."""
-        if self._active_plan is None:
-            return None
-
+    def _maybe_replan_planner(self, state: np.ndarray) -> None:
+        """Receding-horizon style replan from measured state (time + tracking error)."""
+        if self._active_plan is None or not self._is_overriding:
+            return
+        now = time.monotonic()
         traj = np.asarray(self._active_plan['trajectory'])
         T = traj.shape[1]
+        k = min(self._plan_step, T - 1)
+        timed = (now - self._last_planner_replan_mono) >= self._planner_replan_sec
+        xy_err = float(np.linalg.norm(state[:2] - traj[:2, k]))
+        yaw_err = float(
+            abs((state[3] - traj[3, k] + np.pi) % (2.0 * np.pi) - np.pi))
+        off_nominal = (
+            xy_err > self._planner_track_xy_thresh
+            or yaw_err > self._planner_track_yaw_thresh)
+        if not timed and not off_nominal:
+            return
+        warm = self._shift_controls(np.asarray(self._active_plan['controls']))
+        self._u_warm_planner = warm
+        plan = self._generate_plan(np.asarray(state, dtype=float).ravel()[:5])
+        if plan is None:
+            self._active_plan = None
+            self._plan_step = 0
+            return
+        self._active_plan = plan
+        self._plan_step = 0
+        self._u_warm_planner = np.asarray(plan['controls']).copy()
+        self._last_planner_replan_mono = now
+
+    def _planner_override_command(
+            self, state: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Lab3-style local LQR: u = u_bar + k + K(x - x_bar), then one ILQR dynamics step."""
+        if self._active_plan is None:
+            return None
+        x = np.asarray(state, dtype=float).ravel()[:5]
+        traj = np.asarray(self._active_plan['trajectory'])
+        ctrl = np.asarray(self._active_plan['controls'])
+        T = traj.shape[1]
+        k = min(self._plan_step, T - 1)
+        x_bar = traj[:, k]
+        u_bar = ctrl[:, k]
+
+        K = self._active_plan.get('K_closed_loop')
+        k_open = self._active_plan.get('k_open_loop')
+        x_diff = x - x_bar
+        x_diff[3] = (x_diff[3] + np.pi) % (2.0 * np.pi) - np.pi
+
+        if K is not None and getattr(K, 'size', 0) > 0:
+            Kk = K[:, :, k]
+            kk = (k_open[:, k] if k_open is not None
+                  else np.zeros(self._planner_ilqr.dim_u))
+            u = np.asarray(u_bar + kk + Kk @ x_diff, dtype=float).ravel()
+        else:
+            u = np.asarray(u_bar, dtype=float).ravel()
+
+        ua, uo = self._clip_controls(float(u[0]), float(u[1]))
+        u_cmd = np.array([ua, uo], dtype=float)
+        try:
+            x_next, _ = self._planner_ilqr.dyn.integrate_forward_np(x, u_cmd)
+        except Exception:
+            return None
+        x_next = np.asarray(x_next, dtype=float).ravel()
+        safe_speed = max(0.0, float(x_next[2]))
+        safe_steer = float(np.clip(x_next[4], -self._delta_max, self._delta_max))
 
         self._plan_step += 1
-
         if self._plan_step >= T - 1:
-            # Exhausted the trajectory — replan from current state
-            warm = self._shift_controls(np.asarray(self._active_plan['controls']))
+            warm = self._shift_controls(ctrl)
             self._u_warm_planner = warm
-            plan = self._generate_plan(state)
+            plan = self._generate_plan(x)
             if plan is None:
                 self._active_plan = None
                 self._is_overriding = False
+                self._plan_step = 0
                 return None
             self._active_plan = plan
             self._plan_step = 0
             self._u_warm_planner = np.asarray(plan['controls']).copy()
-            traj = np.asarray(plan['trajectory'])
-
-        k = min(self._plan_step, traj.shape[1] - 1)
-        safe_speed = max(0.0, float(traj[2, k]))
-        safe_steer = float(np.clip(traj[4, k], -self._delta_max, self._delta_max))
+            self._last_planner_replan_mono = time.monotonic()
         return safe_speed, safe_steer
 
     def _exit_override(self):
@@ -256,11 +327,6 @@ class PredictiveSafetyFilter:
 
         if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
             self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
-        
-        #== rem
-        if self._on_planner_plan and self._active_plan and 'trajectory' in self._active_plan:
-            self._on_planner_plan(np.asarray(self._active_plan['trajectory']))
-        #===
 
         # if self._logger is not None:
         #     self._logger.warn(
@@ -297,16 +363,20 @@ class PredictiveSafetyFilter:
         #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
         #     )
         
+
         # return 0.0, float(human_steer), 'Stopped'
 
-        # Monitor says unsafe — use cached planner plan
-        if not self._is_overriding:
-            # First tick of override: generate a plan
+        # Monitor says unsafe — cached planner + LQR tracking + periodic replanning
+        if (not self._is_overriding) or (self._active_plan is None):
             if not self._enter_override(state):
                 return 0.0, self._last_safe_steer, 'brake'
 
-        # Consume next step from the cached plan
-        result = self._advance_plan(state)
+        self._maybe_replan_planner(state)
+        if self._active_plan is None:
+            self._is_overriding = False
+            return 0.0, self._last_safe_steer, 'brake'
+
+        result = self._planner_override_command(state)
 
         if self._on_planner_plan and self._active_plan and 'trajectory' in self._active_plan:
             self._on_planner_plan(np.asarray(self._active_plan['trajectory']))
