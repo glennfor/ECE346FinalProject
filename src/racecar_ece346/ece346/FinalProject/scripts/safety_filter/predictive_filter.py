@@ -91,15 +91,15 @@ class PredictiveSafetyFilter:
 
         # --- Replan / nominal tracking: HARDcoded here (same defaults as old ROS params). ---
         # Node still passes planner_replan_sec / planner_track_* but they are ignored.
-        self._planner_replan_sec = 0.15  # s; min host-monotonic interval between replans while overriding
+        self._planner_replan_sec = 0.1  # s; min host-monotonic interval between replans while overriding
         self._planner_track_xy_thresh = 0.35  # m; replan if |xy - x_bar| exceeds this at current stage k
         self._planner_track_yaw_thresh = 0.5  # rad; replan if |yaw - yaw_bar| exceeds this at stage k
         # prev impl: read from constructor / ROS:
         # self._planner_replan_sec = float(planner_replan_sec)
         # self._planner_track_xy_thresh = float(planner_track_xy_thresh)
         # self._planner_track_yaw_thresh = float(planner_track_yaw_thresh)
-        _ignored_planner_tune_from_node = (
-            planner_replan_sec, planner_track_xy_thresh, planner_track_yaw_thresh)
+        # _ignored_planner_tune_from_node = (
+        #     planner_replan_sec, planner_track_xy_thresh, planner_track_yaw_thresh)
 
         self._last_planner_replan_mono = 0.0  # time.monotonic() stamp; Lab3 used ROS t in state[-1]
 
