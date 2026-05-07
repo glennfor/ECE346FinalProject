@@ -126,9 +126,9 @@ class PredictiveSafetyFilter:
         planner_plan = self._safe_plan(
             self._planner_ilqr, state, self._u_warm_planner)
 
-        monitor_is_unsafe = self._is_unsafe(
+        monitor_is_unsafe, monitor_reason = self._is_unsafe(
             monitor_plan, self._monitor_max_allowed_cost)
-        planner_is_unsafe = self._is_unsafe(
+        planner_is_unsafe, planner_reason = self._is_unsafe(
             planner_plan, self._planner_max_allowed_cost)
 
         if monitor_plan is not None and 'controls' in monitor_plan:
@@ -148,7 +148,11 @@ class PredictiveSafetyFilter:
 
         if self._logger is not None:
             self._logger.warn(
-                'PredictiveSafetyFilter: monitor+planner unsafe — braking.')
+                f'PredictiveSafetyFilter: braking. '
+                f'monitor[{monitor_reason}] | planner[{planner_reason}] | '
+                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+            )
         return 0.0, self._last_safe_steer, 'brake'
 
     def _teleop_command_to_controls(
@@ -195,38 +199,47 @@ class PredictiveSafetyFilter:
                 self._logger.warn(f'PredictiveSafetyFilter: ILQR plan failed: {e}')
             return None
 
-    def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> bool:
-        """Unsafe if invalid status/plan or if plan cost exceeds max allowed."""
-        """Unsafe if invalid, high-cost, or geometrically outside the lane."""
+    def _is_unsafe(self, plan_result: Optional[dict], max_allowed_cost: float) -> Tuple[bool, str]:
+        """Return (is_unsafe, reason). reason is a short string with values.
+
+        Unsafe if invalid status/plan, geometrically outside the lane, or if
+        plan cost exceeds max allowed.
+        """
         if plan_result is None:
-            return True
+            return True, 'plan=None'
         if plan_result.get('status', -1) == -1:
-            return True
+            return True, 'status=-1'
 
         traj = plan_result.get('trajectory')
         if traj is None:
-            return True
-        if self._violates_lane_margin(np.asarray(traj)):
-            return True
+            return True, 'trajectory=None'
 
+        margin = self._lane_min_margin(np.asarray(traj))
         total_cost = plan_result.get('J')
-        if total_cost is None:
-            return True
-        if not np.isfinite(total_cost):
-            return True
-        return bool(float(total_cost) >= float(max_allowed_cost))
+        cost_str = (f'{float(total_cost):.1f}'
+                    if total_cost is not None and np.isfinite(total_cost)
+                    else f'{total_cost}')
 
-    def _violates_lane_margin(self, trajectory: np.ndarray) -> bool:
-        """Hard lane-boundary check for the whole vehicle body.
+        if margin is not None and margin < self._min_lane_margin:
+            return True, (f'lane min_margin={margin:.3f}<{self._min_lane_margin:.3f}m '
+                          f'(J={cost_str})')
 
-        The ILQR lane cost is smooth, so it may still produce a "recoverable"
-        plan whose first state is already outside the lane but whose total cost
-        is below threshold. The safety filter needs a hard invariant: do not
-        accept the human command if the one-step future state or recovery plan
-        leaves too little room to either boundary.
+        if total_cost is None or not np.isfinite(total_cost):
+            return True, f'J={cost_str}'
+
+        if float(total_cost) >= float(max_allowed_cost):
+            return True, f'J={cost_str}>=max={float(max_allowed_cost):.1f}'
+
+        return False, f'OK J={cost_str}'
+
+    def _lane_min_margin(self, trajectory: np.ndarray) -> Optional[float]:
+        """Min lane margin (m) along trajectory; None if no path.
+
+        Negative means the vehicle body crosses the boundary by that amount.
+        Returns -inf on lookup exception (treated as infinite violation).
         """
         if self._ref_path is None:
-            return False
+            return None
 
         try:
             refs = self._ref_path.get_reference(trajectory[:2, :])
@@ -234,7 +247,7 @@ class PredictiveSafetyFilter:
             if self._logger is not None:
                 self._logger.warn(
                     f'PredictiveSafetyFilter: lane check failed: {e}')
-            return True
+            return float('-inf')
 
         closest_x = refs[0, :]
         closest_y = refs[1, :]
@@ -249,8 +262,21 @@ class PredictiveSafetyFilter:
         vehicle_half_width = float(self._planner_ilqr.config.width) / 2.0
         right_margin = width_right - vehicle_half_width - path_dev
         left_margin = width_left - vehicle_half_width + path_dev
-        min_margin = min(float(np.min(right_margin)), float(np.min(left_margin)))
-        return min_margin < self._min_lane_margin
+        return float(min(np.min(right_margin), np.min(left_margin)))
+
+    def _violates_lane_margin(self, trajectory: np.ndarray) -> bool:
+        """Hard lane-boundary check for the whole vehicle body.
+
+        The ILQR lane cost is smooth, so it may still produce a "recoverable"
+        plan whose first state is already outside the lane but whose total cost
+        is below threshold. The safety filter needs a hard invariant: do not
+        accept the human command if the one-step future state or recovery plan
+        leaves too little room to either boundary.
+        """
+        margin = self._lane_min_margin(trajectory)
+        if margin is None:
+            return False
+        return margin < self._min_lane_margin
 
     def _first_control_to_cmd(
         self, plan: dict, state: np.ndarray, dt_step: float
