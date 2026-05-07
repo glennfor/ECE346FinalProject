@@ -3,7 +3,7 @@
 ####################################################
 num_dim_x: 5
 num_dim_u: 2
-T: 30
+T: 100
 dt: 0.1
 platform: 'cpu'
 
@@ -58,7 +58,7 @@ dim_closest_pt_x: 0
 dim_closest_pt_y: 1
 dim_path_slope: 2
 path_cost_type: 'quadratic'
-path_weight: 8.0 #20.0 #8.0
+path_weight: 1.0 #20.0 #8.0
 path_huber_delta: 2
 
 # Velocity Cost
@@ -73,7 +73,7 @@ vel_limit_b: 1.0
 
 # Heading Cost
 heading_cost_type: 'quadratic'
-heading_weight: 4.0 #8.0 #10.0 #4.0 #2.0
+heading_weight: 3.0 #8.0 #10.0 #4.0 #2.0
 heading_huber_delta: 1
 
 # Lateral Acceleration Cost
@@ -89,7 +89,7 @@ progress_weight: 0
 dim_right_boundary: 5
 dim_left_boundary: 6
 lane_boundary_a: 50.0 #20.0 #50.0
-lane_boundary_b: 3 #20.0 #15.0 #3.0
+lane_boundary_b: 15 #20.0 #15.0 #3.0
 
 ########        Control Cost          ############
 

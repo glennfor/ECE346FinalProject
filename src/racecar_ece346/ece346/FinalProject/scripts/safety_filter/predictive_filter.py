@@ -153,22 +153,33 @@ class PredictiveSafetyFilter:
     def _generate_plan(self, state: np.ndarray) -> Optional[dict]:
         """Generate a fresh planner plan from current state, warm-starting if possible."""
         warm = self._u_warm_planner if np.any(self._u_warm_planner) else None
-        plan = self._safe_plan(self._planner_ilqr, state, warm)
-        if plan is None or plan.get('status', -1) == -1:
-            return None
+        fail = ' Did not fail'
+        plan = self._safe_plan(self._planner_ilqr, state, None) #warm)
+        if plan is None :
+            fail = 'plan is None'
+        if plan.get('status', -1) in (-1, 2):
+            fail = 'status=-1,2'
+            plan =  None
         if 'trajectory' not in plan or 'controls' not in plan:
-            return None
+            plan = None
+            fail = 'Missing part'
+        if self._logger is not None:
+            self._logger.warn( f'Our plan gneratioon failed because:. {fail}')
         return plan
 
     def _enter_override(self, state: np.ndarray) -> bool:
         """Plan once when first entering override mode. Returns True if plan succeeded."""
         plan = self._generate_plan(state)
+        if self._logger is not None:
+            self._logger.warn( f'Our plan is good:. {plan is not None}')
         if plan is None:
             return False
         self._active_plan = plan
         self._plan_step = 0
         self._is_overriding = True
         self._u_warm_planner = np.asarray(plan['controls']).copy()
+
+        
         return True
 
     def _advance_plan(self, state: np.ndarray) -> Optional[Tuple[float, float]]:
@@ -245,6 +256,11 @@ class PredictiveSafetyFilter:
 
         if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
             self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
+        
+        #== rem
+        if self._on_planner_plan and self._active_plan and 'trajectory' in self._active_plan:
+            self._on_planner_plan(np.asarray(self._active_plan['trajectory']))
+        #===
 
         # if self._logger is not None:
         #     self._logger.warn(
@@ -255,14 +271,14 @@ class PredictiveSafetyFilter:
         #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
         #     )
         # add for braking
-        if self._logger is not None:
-            override_str = f' step={self._plan_step}' if self._is_overriding else ''
-            self._logger.warn(
-                f'PredictiveSafetyFilter: '
-                f'monitor[{monitor_reason}]{override_str} '
-                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
-                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
-            )
+        # if self._logger is not None:
+        #     override_str = f' step={self._plan_step}' if self._is_overriding else ''
+        #     self._logger.warn(
+        #         f'PredictiveSafetyFilter: '
+        #         f'monitor[{monitor_reason}]{override_str} '
+        #         f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+        #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+        #     )
 
         # --- Decision ---
         if not monitor_is_unsafe:
@@ -281,7 +297,7 @@ class PredictiveSafetyFilter:
         #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
         #     )
         
-        return 0.0, float(human_steer), 'Stopped'
+        # return 0.0, float(human_steer), 'Stopped'
 
         # Monitor says unsafe — use cached planner plan
         if not self._is_overriding:
