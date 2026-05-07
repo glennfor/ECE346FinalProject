@@ -44,7 +44,7 @@ joy_to_ackermann_node:
     steering_axis: 3 # right stick X (left = +steering)
     throttle_sign: 1.0
     steering_sign: 1.0
-    max_speed: 0.5 # m/s
+    max_speed: 0.4 #0.5 # m/s
     max_steering_angle: 0.34 # rad
     deadzone: 0.05
 
@@ -68,11 +68,11 @@ safety_filter_node:
     total_soft_threshold: 400.0
     total_hard_threshold: 2000.0
     wheelbase: 0.324
-    monitor_max_allowed_cost: 3000.0
-    planner_max_allowed_cost: 4000.0
+    monitor_max_allowed_cost: 600.0
+    planner_max_allowed_cost: 80000.0
     # We need a hard geometric lane boundary: min clearance of 0.1m from body of car before
     # human control is rejected
-    min_lane_margin: 0.1 #0.03
+    min_lane_margin: 0.03 #0.03
     filter_accel_min: -1.5
     filter_accel_max: 1.5
     filter_omega_min: -6.0

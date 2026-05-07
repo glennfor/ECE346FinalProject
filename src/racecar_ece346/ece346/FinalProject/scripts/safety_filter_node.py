@@ -59,7 +59,7 @@ from ece346.FinalProject.scripts.safety_filter.predictive_filter import \
     PredictiveSafetyFilter
 from ece346.FinalProject.scripts.safety_filter.projector import \
     ForwardProjector
-from ece346.FinalProject.scripts.safety_filter.vizualizer import Visualizer
+from ece346.FinalProject.scripts.safety_filter.visualizer import Visualizer
 from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path as PathMsg
 from rclpy.node import Node
@@ -445,7 +445,7 @@ class SafetyFilterNode(Node):
         # ACTIVE: predictive (two-ILQR) safety filter
         # ====================================================================
         safe_speed, safe_steer, _info = self._predictive.filter(
-            state, human_speed, human_steer, dt_step=self._control_dt,
+            state, human_speed, human_steer, dt_step=0.3 ,#self._control_dt,
         )
         filtered_speed = safe_speed
         filtered_steer = safe_steer
@@ -493,7 +493,9 @@ class SafetyFilterNode(Node):
         #         filtered_speed = human_speed * 0.5
         #         filtered_steer = human_steer
 
-        filtered_speed = min(filtered_speed, self._max_speed)
+        # filtered_speed = min(filtered_speed, self._max_speed)
+
+        filtered_speed = np.clip(filtered_speed, 0, 0.4)
 
         filtered_control = AckermannDriveStamped()
         filtered_control.header = teleop.header

@@ -18,6 +18,7 @@ for practical control when intervention is required.
 from typing import Optional, Tuple
 
 import numpy as np
+import copy
 
 
 class PredictiveSafetyFilter:
@@ -94,7 +95,7 @@ class PredictiveSafetyFilter:
         self._on_monitor_plan = on_monitor_plan
 
     def update_ref_path(self, ref_path) -> None:
-        self._ref_path = ref_path
+        self._ref_path = copy.deepcopy(ref_path)
         self._planner_ilqr.update_ref_path(ref_path)
         self._monitor_ilqr.update_ref_path(ref_path)
         self._has_path = ref_path is not None
@@ -134,9 +135,9 @@ class PredictiveSafetyFilter:
         state_after = self._sim_forward(state, accel_h, omega_h, dt_step)
 
         monitor_plan = self._safe_plan(
-            self._monitor_ilqr, state_after, self._u_warm_monitor)
+            self._monitor_ilqr, state_after, None)#self._u_warm_monitor)
         planner_plan = self._safe_plan(
-            self._planner_ilqr, state, self._u_warm_planner)
+            self._planner_ilqr, state, None)#self._u_warm_planner)
 
         monitor_is_unsafe, monitor_reason = self._is_unsafe(
             monitor_plan, self._monitor_max_allowed_cost)
@@ -210,9 +211,10 @@ class PredictiveSafetyFilter:
             x = np.asarray(x)
         return x
 
-    def _safe_plan(self, ilqr, init_state: np.ndarray, warm_controls: np.ndarray) -> Optional[dict]:
+    def _safe_plan(self, ilqr, init_state: np.ndarray, warm_controls: Optional[np.ndarray] = None) -> Optional[dict]:
         try:
-            return ilqr.plan(init_state, controls=warm_controls.copy())
+            controls = warm_controls.copy() if warm_controls is not None else None
+            return ilqr.plan(init_state, controls=controls)
         except Exception as e:
             if self._logger is not None:
                 self._logger.warn(f'PredictiveSafetyFilter: ILQR plan failed: {e}')
@@ -226,8 +228,8 @@ class PredictiveSafetyFilter:
         """
         if plan_result is None:
             return True, 'plan=None'
-        if plan_result.get('status', -1) == -1:
-            return True, 'status=-1'
+        if plan_result.get('status', -1) in (-1, 2):
+            return True, f'status={plan_result.get("status")}'
 
         traj = plan_result.get('trajectory')
         if traj is None:
@@ -239,9 +241,9 @@ class PredictiveSafetyFilter:
                     if total_cost is not None and np.isfinite(total_cost)
                     else f'{total_cost}')
 
-        if margin is not None and margin < self._min_lane_margin:
-            return True, (f'lane min_margin={margin:.3f}<{self._min_lane_margin:.3f}m '
-                          f'(J={cost_str})')
+        # if margin is not None and margin < self._min_lane_margin:
+        #     return True, (f'lane min_margin={margin:.3f}<{self._min_lane_margin:.3f}m '
+        #                   f'(J={cost_str})')
 
         if total_cost is None or not np.isfinite(total_cost):
             return True, f'J={cost_str}'
@@ -300,7 +302,7 @@ class PredictiveSafetyFilter:
     def _first_control_to_cmd(
         self, plan: dict, state: np.ndarray, dt_step: float
     ) -> Tuple[float, float]:
-        # """Apply ILQR's first stage control over one ROS tick."""
+        """Apply ILQR's first stage control over one ROS tick."""
         # controls = np.asarray(plan['controls'])
         # accel_cmd = float(controls[0, 0])
         # omega_cmd = float(controls[1, 0])
