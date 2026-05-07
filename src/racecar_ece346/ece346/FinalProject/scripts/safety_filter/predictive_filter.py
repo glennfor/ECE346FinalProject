@@ -20,9 +20,10 @@ from types import SimpleNamespace
 from typing import Optional, Tuple
 
 import numpy as np
-
-from ece346.FinalProject.ILQR_Example.cost.collision_checker.collision_checker import CollisionChecker
-from ece346.FinalProject.ILQR_Example.cost.collision_checker.obstacle import Obstacle
+from ece346.FinalProject.ILQR_Example.cost.collision_checker.collision_checker import \
+    CollisionChecker
+from ece346.FinalProject.ILQR_Example.cost.collision_checker.obstacle import \
+    Obstacle
 
 
 class PredictiveSafetyFilter:
@@ -92,7 +93,13 @@ class PredictiveSafetyFilter:
         collision_cfg = SimpleNamespace(
             width=0.22, length=0.40, wheelbase=0.324, T=1)
         self._collision_checker = CollisionChecker(collision_cfg)
-        
+
+        # Cached planner plan state: when overriding, we consume this trajectory
+        # step-by-step instead of replanning every tick.
+        self._active_plan = None       # dict with 'trajectory' and 'controls'
+        self._plan_step = 0            # current index into the cached plan
+        self._is_overriding = False    # True while consuming the planner plan
+
         self._on_planner_plan = None
         self._on_monitor_plan = None
 
@@ -143,6 +150,62 @@ class PredictiveSafetyFilter:
                     f'DIST==: obstacle  {min_dist}m away')
         return min_dist < self._brake_distance
 
+    def _generate_plan(self, state: np.ndarray) -> Optional[dict]:
+        """Generate a fresh planner plan from current state, warm-starting if possible."""
+        warm = self._u_warm_planner if np.any(self._u_warm_planner) else None
+        plan = self._safe_plan(self._planner_ilqr, state, warm)
+        if plan is None or plan.get('status', -1) == -1:
+            return None
+        if 'trajectory' not in plan or 'controls' not in plan:
+            return None
+        return plan
+
+    def _enter_override(self, state: np.ndarray) -> bool:
+        """Plan once when first entering override mode. Returns True if plan succeeded."""
+        plan = self._generate_plan(state)
+        if plan is None:
+            return False
+        self._active_plan = plan
+        self._plan_step = 0
+        self._is_overriding = True
+        self._u_warm_planner = np.asarray(plan['controls']).copy()
+        return True
+
+    def _advance_plan(self, state: np.ndarray) -> Optional[Tuple[float, float]]:
+        """Consume next step from cached plan. Replan if exhausted."""
+        if self._active_plan is None:
+            return None
+
+        traj = np.asarray(self._active_plan['trajectory'])
+        T = traj.shape[1]
+
+        self._plan_step += 1
+
+        if self._plan_step >= T - 1:
+            # Exhausted the trajectory — replan from current state
+            warm = self._shift_controls(np.asarray(self._active_plan['controls']))
+            self._u_warm_planner = warm
+            plan = self._generate_plan(state)
+            if plan is None:
+                self._active_plan = None
+                self._is_overriding = False
+                return None
+            self._active_plan = plan
+            self._plan_step = 0
+            self._u_warm_planner = np.asarray(plan['controls']).copy()
+            traj = np.asarray(plan['trajectory'])
+
+        k = min(self._plan_step, traj.shape[1] - 1)
+        safe_speed = max(0.0, float(traj[2, k]))
+        safe_steer = float(np.clip(traj[4, k], -self._delta_max, self._delta_max))
+        return safe_speed, safe_steer
+
+    def _exit_override(self):
+        """Release planner plan when human is safe again."""
+        self._is_overriding = False
+        self._active_plan = None
+        self._plan_step = 0
+
     def filter(
         self,
         state: np.ndarray,
@@ -152,43 +215,34 @@ class PredictiveSafetyFilter:
     ) -> Tuple[float, float, str]:
         """
         Returns (safe_speed, safe_steer, info) where info is one of
-        'pass'      — human command accepted (monitor safe)
-        'override'  — planner first control applied (monitor unsafe)
-        'brake'     — monitor unsafe and planner unsafe; full brake
-        'no_path'   — no ref path yet; passthrough human command
+        'pass'            — human command accepted (monitor safe)
+        'override'        — consuming cached planner trajectory
+        'override_replan' — replanned because trajectory was exhausted
+        'brake'           — override failed; full brake
+        'no_path'         — no ref path yet; passthrough human command
         'proximity_brake' — obstacle within brake_distance; full stop
         """
         if self._obstacle_too_close(state):
             if self._logger is not None:
                 self._logger.warn(
                     f'PredictiveSafetyFilter: obstacle within {self._brake_distance}m — braking')
-            return 0.0, .1, 'proximity_brake'
-
+            self._exit_override()
+            return 0.0, 0.0, 'proximity_brake'
         if not self._has_path:
             return float(human_speed), float(human_steer), 'no_path'
 
+        # --- Monitor: check if human command is safe ---
         accel_h, omega_h = self._teleop_command_to_controls(
             state, human_speed, human_steer)
         state_after = self._sim_forward(state, accel_h, omega_h, dt_step)
 
-        monitor_plan = self._safe_plan(
-            self._monitor_ilqr, state_after, None)#self._u_warm_monitor)
-        planner_plan = self._safe_plan(
-            self._planner_ilqr, state, None)#self._u_warm_planner)
-
+        monitor_plan = self._safe_plan(self._monitor_ilqr, state_after, None)
         monitor_is_unsafe, monitor_reason = self._is_unsafe(
             monitor_plan, self._monitor_max_allowed_cost)
-        # planner_is_unsafe, planner_reason = self._is_unsafe(
-        #     planner_plan, self._planner_max_allowed_cost, skip_first_state=True)
 
         if monitor_plan is not None and 'controls' in monitor_plan:
             self._u_warm_monitor = self._shift_controls(monitor_plan['controls'])
-        if planner_plan is not None and 'controls' in planner_plan:
-            self._u_warm_planner = self._shift_controls(planner_plan['controls'])
-        
 
-        if self._on_planner_plan and planner_plan and 'trajectory' in planner_plan:
-            self._on_planner_plan(np.asarray(planner_plan['trajectory']))
         if self._on_monitor_plan and monitor_plan and 'trajectory' in monitor_plan:
             self._on_monitor_plan(np.asarray(monitor_plan['trajectory']))
 
@@ -201,7 +255,20 @@ class PredictiveSafetyFilter:
         #         f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
         #     )
         # add for braking
+        if self._logger is not None:
+            override_str = f' step={self._plan_step}' if self._is_overriding else ''
+            self._logger.warn(
+                f'PredictiveSafetyFilter: '
+                f'monitor[{monitor_reason}]{override_str} '
+                f'v={float(state[2]):.2f} delta={float(state[4]):.3f} '
+                f'human(speed={float(human_speed):.2f},steer={float(human_steer):.3f})'
+            )
+
+        # --- Decision ---
         if not monitor_is_unsafe:
+            # Human is safe — release override if active
+            if self._is_overriding:
+                self._exit_override()
             self._last_safe_steer = float(human_steer)
             return float(human_speed), float(human_steer), 'pass'
         
@@ -216,14 +283,25 @@ class PredictiveSafetyFilter:
         
         return 0.0, float(human_steer), 'Stopped'
 
-        if not planner_is_unsafe:
-            safe_speed, safe_steer = self._first_control_to_cmd(
-                planner_plan, state, dt_step)
-            self._last_safe_steer = safe_steer
-            return safe_speed, safe_steer, 'override'
+        # Monitor says unsafe — use cached planner plan
+        if not self._is_overriding:
+            # First tick of override: generate a plan
+            if not self._enter_override(state):
+                return 0.0, self._last_safe_steer, 'brake'
 
-        
-        return 0.0, self._last_safe_steer, 'brake'
+        # Consume next step from the cached plan
+        result = self._advance_plan(state)
+
+        if self._on_planner_plan and self._active_plan and 'trajectory' in self._active_plan:
+            self._on_planner_plan(np.asarray(self._active_plan['trajectory']))
+
+        if result is None:
+            self._exit_override()
+            return 0.0, self._last_safe_steer, 'brake'
+
+        safe_speed, safe_steer = result
+        self._last_safe_steer = safe_steer
+        return safe_speed, safe_steer, 'override'
 
     def _teleop_command_to_controls(
         self, state: np.ndarray, target_speed: float, target_steer: float
